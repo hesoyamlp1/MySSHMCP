@@ -1,0 +1,28 @@
+{
+  "name": "ssh-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for SSH remote command execution",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "ssh-mcp-server": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ssh2": "^1.16.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ssh2": "^1.15.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
