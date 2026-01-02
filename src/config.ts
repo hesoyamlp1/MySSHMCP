@@ -12,10 +12,19 @@ export class ConfigManager {
   }
 
   private resolveConfigPath(): string {
+    // 1. 优先使用环境变量
     if (process.env.SSH_MCP_CONFIG_PATH) {
       return this.expandPath(process.env.SSH_MCP_CONFIG_PATH);
     }
-    return join(homedir(), ".config", "ssh-mcp", "servers.json");
+
+    // 2. 查找项目目录下的 .claude/ssh-servers.json
+    const projectPath = join(process.cwd(), ".claude", "ssh-servers.json");
+    if (existsSync(projectPath)) {
+      return projectPath;
+    }
+
+    // 3. 查找用户目录下的 ~/.claude/ssh-servers.json
+    return join(homedir(), ".claude", "ssh-servers.json");
   }
 
   private expandPath(path: string): string {

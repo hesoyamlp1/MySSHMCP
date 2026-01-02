@@ -1,0 +1,18 @@
+{
+  "servers": [
+    {
+      "name": "my-server",
+      "host": "192.168.1.100",
+      "port": 22,
+      "username": "root",
+      "privateKeyPath": "~/.ssh/id_rsa"
+    },
+    {
+      "name": "dev-server",
+      "host": "10.0.0.50",
+      "port": 22,
+      "username": "ubuntu",
+      "password": "your-password"
+    }
+  ]
+}

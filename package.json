@@ -1,17 +1,35 @@
 {
-  "name": "ssh-mcp-server",
+  "name": "mcp-ssh-pty",
   "version": "1.0.0",
-  "description": "MCP Server for SSH remote command execution",
+  "description": "MCP Server for SSH remote command execution with PTY shell support",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "ssh-mcp-server": "./dist/index.js"
+    "mcp-ssh-pty": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
   },
+  "keywords": [
+    "mcp",
+    "ssh",
+    "claude",
+    "anthropic",
+    "ai",
+    "remote",
+    "shell",
+    "pty"
+  ],
+  "author": "me",
+  "license": "MIT",
+
+  "files": [
+    "dist",
+    "ssh-servers.example.json"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "ssh2": "^1.16.0",

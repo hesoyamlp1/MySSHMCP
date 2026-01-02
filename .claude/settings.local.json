@@ -1,11 +1,12 @@
 {
+  "permissions": {
+    "allow": [
+      "mcp__ssh__ssh",
+      "Bash(npm view:*)"
+    ]
+  },
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "ssh"
-  ],
-  "permissions": {
-    "allow": [
-      "mcp__ssh__ssh"
-    ]
-  }
+  ]
 }
