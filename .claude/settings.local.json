@@ -1,0 +1,11 @@
+{
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "ssh"
+  ],
+  "permissions": {
+    "allow": [
+      "mcp__ssh__ssh"
+    ]
+  }
+}

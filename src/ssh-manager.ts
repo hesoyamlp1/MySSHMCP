@@ -2,12 +2,18 @@ import { Client } from "ssh2";
 import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { ServerConfig, CommandResult, ConnectionStatus } from "./types.js";
+import { ServerConfig, ConnectionStatus } from "./types.js";
+import { ShellManager } from "./shell-manager.js";
 
 export class SSHManager {
   private client: Client | null = null;
   private currentServer: ServerConfig | null = null;
   private isConnected: boolean = false;
+  private shellManager: ShellManager;
+
+  constructor() {
+    this.shellManager = new ShellManager();
+  }
 
   private expandPath(path: string): string {
     if (path.startsWith("~")) {
@@ -24,10 +30,18 @@ export class SSHManager {
     return new Promise((resolve, reject) => {
       this.client = new Client();
 
-      this.client.on("ready", () => {
+      this.client.on("ready", async () => {
         this.isConnected = true;
         this.currentServer = config;
-        resolve();
+
+        // 连接成功后自动打开 shell
+        try {
+          await this.shellManager.open(this.client!);
+          resolve();
+        } catch (err) {
+          this.cleanup();
+          reject(err);
+        }
       });
 
       this.client.on("error", (err) => {
@@ -68,6 +82,9 @@ export class SSHManager {
   }
 
   async disconnect(): Promise<void> {
+    // 先关闭 shell
+    this.shellManager.close();
+
     if (this.client && this.isConnected) {
       this.client.end();
     }
@@ -80,45 +97,8 @@ export class SSHManager {
     this.client = null;
   }
 
-  async executeCommand(command: string, timeout: number = 30000): Promise<CommandResult> {
-    if (!this.client || !this.isConnected) {
-      throw new Error("未连接到服务器，请先使用 connect_server 连接");
-    }
-
-    return new Promise((resolve, reject) => {
-      let stdout = "";
-      let stderr = "";
-      let timeoutId: NodeJS.Timeout;
-
-      this.client!.exec(command, (err, stream) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-
-        timeoutId = setTimeout(() => {
-          stream.close();
-          reject(new Error(`命令执行超时 (>${timeout}ms)`));
-        }, timeout);
-
-        stream.on("close", (code: number) => {
-          clearTimeout(timeoutId);
-          resolve({
-            stdout: stdout.trim(),
-            stderr: stderr.trim(),
-            exitCode: code || 0,
-          });
-        });
-
-        stream.on("data", (data: Buffer) => {
-          stdout += data.toString();
-        });
-
-        stream.stderr.on("data", (data: Buffer) => {
-          stderr += data.toString();
-        });
-      });
-    });
+  getShellManager(): ShellManager {
+    return this.shellManager;
   }
 
   getStatus(): ConnectionStatus {
