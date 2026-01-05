@@ -3,7 +3,7 @@
 import { Command } from "commander";
 import { select, input, password, confirm } from "@inquirer/prompts";
 import { ConfigManager, ConfigScope } from "./config.js";
-import { SSHManager } from "./ssh-manager.js";
+import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
 import { ServerConfig } from "./types.js";
 
 /**
@@ -32,6 +32,10 @@ function formatScope(scope: ConfigScope): string {
  * list 命令
  */
 async function listServers(options: { local?: boolean; global?: boolean; all?: boolean }): Promise<void> {
+  // 先显示内置服务器
+  console.log("=== 内置服务器 ===");
+  console.log(`  • local (本地 shell)\n`);
+
   if (options.all) {
     // 显示两个级别的配置
     console.log("=== 项目级别 (local) ===");
@@ -69,16 +73,15 @@ async function listServers(options: { local?: boolean; global?: boolean; all?: b
   const configManager = getConfigManager(scope);
   const servers = configManager.listServers();
 
-  console.log(`配置级别: ${formatScope(configManager.getScope())}`);
-  console.log(`配置文件: ${configManager.getConfigPath()}\n`);
+  console.log(`=== ${formatScope(configManager.getScope())} ===`);
+  console.log(`路径: ${configManager.getConfigPath()}\n`);
 
   if (servers.length === 0) {
-    console.log("没有配置任何服务器");
+    console.log("(空)");
     console.log("\n使用 'mcp-ssh-pty add' 添加服务器");
     return;
   }
 
-  console.log("已配置的服务器:\n");
   servers.forEach((server, index) => {
     console.log(`  ${index + 1}. ${formatServer(server)}`);
   });

@@ -6,11 +6,20 @@ import { ServerConfig, ConnectionStatus } from "./types.js";
 import { ShellManager } from "./shell-manager.js";
 import { getSanitizer } from "./sanitizer.js";
 
+// 内置的本地服务器配置
+export const LOCAL_SERVER: ServerConfig = {
+  name: "local",
+  host: "localhost",
+  port: 0,
+  username: process.env.USER || process.env.USERNAME || "local",
+};
+
 export class SSHManager {
   private client: Client | null = null;
   private currentServer: ServerConfig | null = null;
   private isConnected: boolean = false;
   private shellManager: ShellManager;
+  private isLocalConnection: boolean = false;
 
   constructor() {
     this.shellManager = new ShellManager();
@@ -23,16 +32,51 @@ export class SSHManager {
     return path;
   }
 
+  /**
+   * 检查是否是本地连接
+   */
+  static isLocalServer(config: ServerConfig): boolean {
+    return config.name === "local" || config.host === "local";
+  }
+
   async connect(config: ServerConfig): Promise<void> {
     if (this.isConnected) {
       await this.disconnect();
     }
 
+    // 检查是否是本地连接
+    if (SSHManager.isLocalServer(config)) {
+      return this.connectLocal();
+    }
+
+    return this.connectSSH(config);
+  }
+
+  /**
+   * 本地连接
+   */
+  private async connectLocal(): Promise<void> {
+    try {
+      await this.shellManager.openLocal();
+      this.isConnected = true;
+      this.isLocalConnection = true;
+      this.currentServer = LOCAL_SERVER;
+    } catch (error) {
+      this.cleanup();
+      throw error;
+    }
+  }
+
+  /**
+   * SSH 远程连接
+   */
+  private async connectSSH(config: ServerConfig): Promise<void> {
     return new Promise((resolve, reject) => {
       this.client = new Client();
 
       this.client.on("ready", async () => {
         this.isConnected = true;
+        this.isLocalConnection = false;
         this.currentServer = config;
 
         // 注册敏感信息到过滤器
@@ -89,7 +133,7 @@ export class SSHManager {
     // 先关闭 shell
     this.shellManager.close();
 
-    if (this.client && this.isConnected) {
+    if (this.client && this.isConnected && !this.isLocalConnection) {
       this.client.end();
     }
     this.cleanup();
@@ -97,6 +141,7 @@ export class SSHManager {
 
   private cleanup(): void {
     this.isConnected = false;
+    this.isLocalConnection = false;
     this.currentServer = null;
     this.client = null;
     // 清除敏感信息
@@ -121,11 +166,15 @@ export class SSHManager {
     return this.shellManager;
   }
 
+  isLocal(): boolean {
+    return this.isLocalConnection;
+  }
+
   getStatus(): ConnectionStatus {
     return {
       connected: this.isConnected,
       serverName: this.currentServer?.name || null,
-      host: this.currentServer?.host || null,
+      host: this.isLocalConnection ? "local" : (this.currentServer?.host || null),
       username: this.currentServer?.username || null,
     };
   }

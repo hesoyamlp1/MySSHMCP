@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { SSHManager } from "./ssh-manager.js";
+import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
 import { sanitize } from "./sanitizer.js";
 import { ShellResult } from "./types.js";
@@ -176,10 +176,19 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止`,
             const servers = configManager.listServers();
             const status = sshManager.getStatus();
 
-            const list = servers.map((s) => ({
-              name: s.name,
-              connected: status.serverName === s.name,
-            }));
+            // 添加内置的 local 服务器
+            const list = [
+              {
+                name: LOCAL_SERVER.name,
+                connected: status.serverName === LOCAL_SERVER.name,
+                type: "built-in",
+              },
+              ...servers.map((s) => ({
+                name: s.name,
+                connected: status.serverName === s.name,
+                type: "configured",
+              })),
+            ];
 
             return {
               content: [{ type: "text", text: JSON.stringify(list, null, 2) }],
@@ -194,9 +203,20 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止`,
               };
             }
 
+            // 检查是否是本地连接
+            if (serverName === "local") {
+              await sshManager.connect(LOCAL_SERVER);
+              return {
+                content: [{
+                  type: "text",
+                  text: "成功连接到本地 Shell",
+                }],
+              };
+            }
+
             const serverConfig = configManager.getServer(serverName);
             if (!serverConfig) {
-              const available = configManager.listServers().map((s) => s.name);
+              const available = ["local", ...configManager.listServers().map((s) => s.name)];
               return {
                 content: [{
                   type: "text",

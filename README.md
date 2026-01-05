@@ -11,7 +11,7 @@ npm install -g mcp-ssh-pty
 ### Add to Claude Code
 
 ```bash
-claude mcp add ssh -- npx -y mcp-ssh-pty
+claude mcp add --transport stdio ssh -- npx -y mcp-ssh-pty
 ```
 
 ## CLI Commands
@@ -28,7 +28,7 @@ mcp-ssh-pty list --all     # Show both levels
 ### Add server
 
 ```bash
-# Interactive mode (will ask for config level)
+# Interactive mode
 mcp-ssh-pty add
 
 # Save to project level
@@ -58,22 +58,6 @@ mcp-ssh-pty test my-server
 mcp-ssh-pty config
 ```
 
-```
-? 选择配置级别:
-❯ 📁 项目级别 (已存在)
-  🌐 用户级别 (新建)
-
-? 选择操作:
-❯ 📋 查看所有服务器
-  ➕ 添加服务器
-  ✏️  编辑服务器
-  🗑️  删除服务器
-  🔌 测试连接
-  🔄 切换配置级别
-  📁 显示配置文件路径
-  🚪 退出
-```
-
 ## Configuration
 
 ### Config file locations
@@ -83,8 +67,6 @@ mcp-ssh-pty config
 | Project | `./.claude/ssh-servers.json` | High |
 | User | `~/.claude/ssh-servers.json` | Low |
 | Custom | `SSH_MCP_CONFIG_PATH` env | Highest |
-
-Project level config overrides user level when exists.
 
 ### Config format
 
@@ -104,13 +86,25 @@ Project level config overrides user level when exists.
 
 ## MCP Usage
 
-### Connection
+### List Servers
 
 ```
 ssh({ action: "list" })
-ssh({ action: "connect", server: "my-server" })
-ssh({ action: "status" })
-ssh({ action: "disconnect" })
+```
+
+Returns:
+```json
+[
+  { "name": "local", "connected": false, "type": "built-in" },
+  { "name": "my-server", "connected": false, "type": "configured" }
+]
+```
+
+### Connect
+
+```
+ssh({ action: "connect", server: "local" })      # Local shell
+ssh({ action: "connect", server: "my-server" })  # Remote SSH
 ```
 
 ### Command Execution
@@ -143,6 +137,24 @@ ssh({ command: "tail -f /var/log/syslog" })
 ssh({ read: true })
 ssh({ signal: "SIGINT" })          # Ctrl+C
 ```
+
+### Disconnect
+
+```
+ssh({ action: "disconnect" })
+```
+
+### Status
+
+```
+ssh({ action: "status" })
+```
+
+## Built-in Servers
+
+| Name | Description |
+|------|-------------|
+| `local` | Local shell (uses system default shell) |
 
 ## License
 

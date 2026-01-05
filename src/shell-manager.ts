@@ -1,4 +1,5 @@
 import { Client, ClientChannel } from "ssh2";
+import { spawn, ChildProcess } from "child_process";
 import { ShellResult, ShellConfig } from "./types.js";
 
 const DEFAULT_CONFIG: ShellConfig = {
@@ -8,19 +9,29 @@ const DEFAULT_CONFIG: ShellConfig = {
   maxBufferLines: 10000,
 };
 
+interface ShellStream {
+  write(data: string): void;
+  end(): void;
+  on(event: "data", listener: (data: Buffer) => void): void;
+  on(event: "close", listener: () => void): void;
+  on(event: "error", listener: (err: Error) => void): void;
+}
+
 export class ShellManager {
-  private shell: ClientChannel | null = null;
+  private shell: ShellStream | null = null;
+  private localProcess: ChildProcess | null = null;
   private outputBuffer: string = "";
   private outputLines: string[] = [];
   private lastOutputTime: number = 0;
   private config: ShellConfig;
+  private isLocal: boolean = false;
 
   constructor(config?: Partial<ShellConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
   /**
-   * 打开 PTY Shell（在 SSH 连接成功后调用）
+   * 打开远程 PTY Shell（在 SSH 连接成功后调用）
    */
   async open(client: Client): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -33,36 +44,8 @@ export class ShellManager {
           }
 
           this.shell = stream;
-          this.outputBuffer = "";
-          this.outputLines = [];
-          this.lastOutputTime = Date.now();
-
-          // 监听数据事件
-          stream.on("data", (data: Buffer) => {
-            const text = data.toString();
-            this.outputBuffer += text;
-            this.lastOutputTime = Date.now();
-
-            // 按行分割并存储
-            const lines = this.outputBuffer.split("\n");
-            // 最后一个可能是不完整的行，保留在 buffer
-            this.outputBuffer = lines.pop() || "";
-            this.outputLines.push(...lines);
-
-            // 限制缓冲区大小
-            if (this.outputLines.length > this.config.maxBufferLines) {
-              this.outputLines = this.outputLines.slice(-this.config.maxBufferLines);
-            }
-          });
-
-          // 监听关闭事件
-          stream.on("close", () => {
-            this.shell = null;
-          });
-
-          stream.on("error", (err: Error) => {
-            console.error("Shell error:", err.message);
-          });
+          this.isLocal = false;
+          this.setupStream(stream);
 
           // 等待初始提示符
           setTimeout(() => {
@@ -74,10 +57,121 @@ export class ShellManager {
   }
 
   /**
+   * 打开本地 Shell
+   */
+  async openLocal(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        // 检测系统默认 shell
+        const shellPath = process.env.SHELL || (process.platform === "win32" ? "cmd.exe" : "/bin/sh");
+
+        const proc = spawn(shellPath, [], {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: { ...process.env, TERM: "xterm-256color" },
+        });
+
+        this.localProcess = proc;
+        this.isLocal = true;
+
+        // 创建统一的 stream 接口
+        const dataListeners: ((data: Buffer) => void)[] = [];
+        const closeListeners: (() => void)[] = [];
+        const errorListeners: ((err: Error) => void)[] = [];
+
+        proc.stdout?.on("data", (data: Buffer) => {
+          dataListeners.forEach((l) => l(data));
+        });
+        proc.stderr?.on("data", (data: Buffer) => {
+          dataListeners.forEach((l) => l(data));
+        });
+        proc.on("close", () => {
+          closeListeners.forEach((l) => l());
+        });
+        proc.on("error", (err: Error) => {
+          errorListeners.forEach((l) => l(err));
+        });
+
+        const stream: ShellStream = {
+          write: (data: string) => {
+            proc.stdin?.write(data);
+          },
+          end: () => {
+            proc.stdin?.end();
+            proc.kill();
+          },
+          on: ((event: string, listener: unknown) => {
+            if (event === "data") {
+              dataListeners.push(listener as (data: Buffer) => void);
+            } else if (event === "close") {
+              closeListeners.push(listener as () => void);
+            } else if (event === "error") {
+              errorListeners.push(listener as (err: Error) => void);
+            }
+          }) as ShellStream["on"],
+        };
+
+        this.shell = stream;
+        this.setupStream(stream);
+
+        // 等待初始化
+        setTimeout(() => {
+          resolve();
+        }, 300);
+      } catch (error) {
+        reject(new Error(`无法打开本地 shell: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    });
+  }
+
+  /**
+   * 设置 stream 的事件监听
+   */
+  private setupStream(stream: ShellStream): void {
+    this.outputBuffer = "";
+    this.outputLines = [];
+    this.lastOutputTime = Date.now();
+
+    // 监听数据事件
+    stream.on("data", (data: Buffer) => {
+      const text = data.toString();
+      this.outputBuffer += text;
+      this.lastOutputTime = Date.now();
+
+      // 按行分割并存储
+      const lines = this.outputBuffer.split("\n");
+      // 最后一个可能是不完整的行，保留在 buffer
+      this.outputBuffer = lines.pop() || "";
+      this.outputLines.push(...lines);
+
+      // 限制缓冲区大小
+      if (this.outputLines.length > this.config.maxBufferLines) {
+        this.outputLines = this.outputLines.slice(-this.config.maxBufferLines);
+      }
+    });
+
+    // 监听关闭事件
+    stream.on("close", () => {
+      this.shell = null;
+      this.localProcess = null;
+    });
+
+    stream.on("error", (err: Error) => {
+      console.error("Shell error:", err.message);
+    });
+  }
+
+  /**
    * 检查 shell 是否已打开
    */
   isOpen(): boolean {
     return this.shell !== null;
+  }
+
+  /**
+   * 是否是本地 shell
+   */
+  isLocalShell(): boolean {
+    return this.isLocal;
   }
 
   /**
@@ -179,8 +273,13 @@ export class ShellManager {
       this.shell.end();
       this.shell = null;
     }
+    if (this.localProcess) {
+      this.localProcess.kill();
+      this.localProcess = null;
+    }
     this.outputLines = [];
     this.outputBuffer = "";
+    this.isLocal = false;
   }
 
   /**

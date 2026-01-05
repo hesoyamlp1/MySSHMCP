@@ -43,17 +43,12 @@ async function startServer(): Promise<void> {
 
   await server.connect(transport);
 
-  console.error("SSH MCP Server 已启动");
-  console.error(`配置文件路径: ${configManager.getConfigPath()}`);
-
   process.on("SIGINT", async () => {
-    console.error("收到 SIGINT，正在关闭...");
     await sshManager.disconnect();
     process.exit(0);
   });
 
   process.on("SIGTERM", async () => {
-    console.error("收到 SIGTERM，正在关闭...");
     await sshManager.disconnect();
     process.exit(0);
   });
