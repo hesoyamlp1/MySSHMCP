@@ -5,8 +5,30 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SSHManager } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
 import { registerTools } from "./tools.js";
+import { runCLI } from "./cli.js";
 
-async function main() {
+// CLI 命令列表
+const CLI_COMMANDS = ["list", "add", "remove", "rm", "test", "config", "help", "--help", "-h", "--version", "-V"];
+
+/**
+ * 检查是否是 CLI 模式
+ */
+function isCLIMode(): boolean {
+  const args = process.argv.slice(2);
+
+  // 没有参数时启动 MCP 服务器
+  if (args.length === 0) {
+    return false;
+  }
+
+  // 如果第一个参数是 CLI 命令，则进入 CLI 模式
+  return CLI_COMMANDS.includes(args[0]);
+}
+
+/**
+ * 启动 MCP 服务器
+ */
+async function startServer(): Promise<void> {
   const server = new McpServer({
     name: "ssh-mcp-server",
     version: "1.0.0",
@@ -35,6 +57,17 @@ async function main() {
     await sshManager.disconnect();
     process.exit(0);
   });
+}
+
+/**
+ * 主函数
+ */
+async function main(): Promise<void> {
+  if (isCLIMode()) {
+    await runCLI();
+  } else {
+    await startServer();
+  }
 }
 
 main().catch((error) => {

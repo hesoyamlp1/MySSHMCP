@@ -5,18 +5,88 @@ MCP Server for SSH remote command execution with PTY shell support.
 ## Installation
 
 ```bash
+npm install -g mcp-ssh-pty
+```
+
+### Add to Claude Code
+
+```bash
 claude mcp add ssh -- npx -y mcp-ssh-pty
 ```
 
-With custom config path:
+## CLI Commands
+
+### List servers
 
 ```bash
-claude mcp add ssh -e SSH_MCP_CONFIG_PATH=~/ssh-servers.json -- npx -y mcp-ssh-pty
+mcp-ssh-pty list           # Auto-detect config level
+mcp-ssh-pty list --local   # Project level only
+mcp-ssh-pty list --global  # User level only
+mcp-ssh-pty list --all     # Show both levels
+```
+
+### Add server
+
+```bash
+# Interactive mode (will ask for config level)
+mcp-ssh-pty add
+
+# Save to project level
+mcp-ssh-pty add my-server -l -H 192.168.1.100 -u root -k ~/.ssh/id_rsa
+
+# Save to user level
+mcp-ssh-pty add my-server -g -H 192.168.1.100 -u root -p mypassword
+```
+
+### Remove server
+
+```bash
+mcp-ssh-pty remove my-server
+mcp-ssh-pty remove --local   # From project level
+mcp-ssh-pty remove --global  # From user level
+```
+
+### Test connection
+
+```bash
+mcp-ssh-pty test my-server
+```
+
+### Interactive configuration
+
+```bash
+mcp-ssh-pty config
+```
+
+```
+? 选择配置级别:
+❯ 📁 项目级别 (已存在)
+  🌐 用户级别 (新建)
+
+? 选择操作:
+❯ 📋 查看所有服务器
+  ➕ 添加服务器
+  ✏️  编辑服务器
+  🗑️  删除服务器
+  🔌 测试连接
+  🔄 切换配置级别
+  📁 显示配置文件路径
+  🚪 退出
 ```
 
 ## Configuration
 
-Create a `ssh-servers.json` file:
+### Config file locations
+
+| Level | Path | Priority |
+|-------|------|----------|
+| Project | `./.claude/ssh-servers.json` | High |
+| User | `~/.claude/ssh-servers.json` | Low |
+| Custom | `SSH_MCP_CONFIG_PATH` env | Highest |
+
+Project level config overrides user level when exists.
+
+### Config format
 
 ```json
 {
@@ -27,77 +97,51 @@ Create a `ssh-servers.json` file:
       "port": 22,
       "username": "root",
       "privateKeyPath": "~/.ssh/id_rsa"
-    },
-    {
-      "name": "dev-server",
-      "host": "10.0.0.50",
-      "port": 22,
-      "username": "ubuntu",
-      "password": "your-password"
     }
   ]
 }
 ```
 
-Config file search order:
-1. `SSH_MCP_CONFIG_PATH` environment variable
-2. `./ssh-servers.json`
-3. `~/.config/ssh-mcp/servers.json`
+## MCP Usage
 
-## Tools
+### Connection
 
-### ssh
-
-SSH connection management and command execution.
-
-**Actions:**
-- `list` - List available servers
-- `connect` - Connect to a server
-- `disconnect` - Disconnect current session
-- `status` - View connection status
-
-**Quick command:**
-```
-ssh({ command: "ls -la" })
-```
-
-**Example:**
 ```
 ssh({ action: "list" })
 ssh({ action: "connect", server: "my-server" })
-ssh({ command: "whoami" })
+ssh({ action: "status" })
 ssh({ action: "disconnect" })
 ```
 
-### ssh_shell
+### Command Execution
 
-PTY Shell session control for interactive programs.
+```
+ssh({ command: "ls -la" })
+ssh({ command: "whoami" })
+```
 
-**Actions:**
-- `send` - Send command or input
-- `read` - Read output buffer
-- `signal` - Send signal (SIGINT/SIGTSTP/SIGQUIT)
-- `close` - Close shell session
+### Interactive Programs
 
-**Examples:**
-
-Interactive program:
 ```
 ssh({ command: "mysql -u root -p" })
-ssh_shell({ action: "send", input: "password" })
-ssh_shell({ action: "send", input: "SHOW DATABASES;" })
+ssh({ command: "password123" })
+ssh({ command: "SHOW DATABASES;" })
 ```
 
-Read truncated output:
+### Read Buffer
+
 ```
-ssh({ command: "cat /var/log/syslog" })
-ssh_shell({ action: "read", lines: 500 })
+ssh({ read: true })                # Last 20 lines
+ssh({ read: true, lines: -1 })     # All
+ssh({ read: true, lines: 100 })    # 100 lines
 ```
 
-Stop running command:
+### Signal Control
+
 ```
-ssh({ command: "tail -f /var/log/nginx/access.log" })
-ssh_shell({ action: "signal", signal: "SIGINT" })
+ssh({ command: "tail -f /var/log/syslog" })
+ssh({ read: true })
+ssh({ signal: "SIGINT" })          # Ctrl+C
 ```
 
 ## License

@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "mcp__ssh__ssh",
-      "Bash(npm view:*)"
+      "Bash(npm view:*)",
+      "Bash(node dist/index.js:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
