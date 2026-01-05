@@ -1,5 +1,6 @@
 import { Client, ClientChannel } from "ssh2";
 import { spawn, ChildProcess } from "child_process";
+import * as pty from "node-pty";
 import { ShellResult, ShellConfig } from "./types.js";
 
 const DEFAULT_CONFIG: ShellConfig = {
@@ -20,6 +21,7 @@ interface ShellStream {
 export class ShellManager {
   private shell: ShellStream | null = null;
   private localProcess: ChildProcess | null = null;
+  private ptyProcess: pty.IPty | null = null;
   private outputBuffer: string = "";
   private outputLines: string[] = [];
   private lastOutputTime: number = 0;
@@ -57,20 +59,24 @@ export class ShellManager {
   }
 
   /**
-   * 打开本地 Shell
+   * 打开本地 Shell（使用 node-pty 创建真正的 PTY）
    */
   async openLocal(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
         // 检测系统默认 shell
-        const shellPath = process.env.SHELL || (process.platform === "win32" ? "cmd.exe" : "/bin/sh");
+        const shellPath = process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "/bin/sh");
 
-        const proc = spawn(shellPath, [], {
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, TERM: "xterm-256color" },
+        // 使用 node-pty 创建真正的 PTY
+        const ptyProc = pty.spawn(shellPath, [], {
+          name: "xterm-256color",
+          cols: 120,
+          rows: 40,
+          cwd: process.cwd(),
+          env: process.env as { [key: string]: string },
         });
 
-        this.localProcess = proc;
+        this.ptyProcess = ptyProc;
         this.isLocal = true;
 
         // 创建统一的 stream 接口
@@ -78,26 +84,19 @@ export class ShellManager {
         const closeListeners: (() => void)[] = [];
         const errorListeners: ((err: Error) => void)[] = [];
 
-        proc.stdout?.on("data", (data: Buffer) => {
-          dataListeners.forEach((l) => l(data));
+        ptyProc.onData((data: string) => {
+          dataListeners.forEach((l) => l(Buffer.from(data)));
         });
-        proc.stderr?.on("data", (data: Buffer) => {
-          dataListeners.forEach((l) => l(data));
-        });
-        proc.on("close", () => {
+        ptyProc.onExit(() => {
           closeListeners.forEach((l) => l());
-        });
-        proc.on("error", (err: Error) => {
-          errorListeners.forEach((l) => l(err));
         });
 
         const stream: ShellStream = {
           write: (data: string) => {
-            proc.stdin?.write(data);
+            ptyProc.write(data);
           },
           end: () => {
-            proc.stdin?.end();
-            proc.kill();
+            ptyProc.kill();
           },
           on: ((event: string, listener: unknown) => {
             if (event === "data") {
@@ -113,10 +112,10 @@ export class ShellManager {
         this.shell = stream;
         this.setupStream(stream);
 
-        // 等待初始化
+        // 等待初始提示符
         setTimeout(() => {
           resolve();
-        }, 300);
+        }, 500);
       } catch (error) {
         reject(new Error(`无法打开本地 shell: ${error instanceof Error ? error.message : String(error)}`));
       }
@@ -153,6 +152,7 @@ export class ShellManager {
     stream.on("close", () => {
       this.shell = null;
       this.localProcess = null;
+      this.ptyProcess = null;
     });
 
     stream.on("error", (err: Error) => {
@@ -276,6 +276,10 @@ export class ShellManager {
     if (this.localProcess) {
       this.localProcess.kill();
       this.localProcess = null;
+    }
+    if (this.ptyProcess) {
+      this.ptyProcess.kill();
+      this.ptyProcess = null;
     }
     this.outputLines = [];
     this.outputBuffer = "";
