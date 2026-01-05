@@ -99,6 +99,22 @@ export class SSHManager {
     this.isConnected = false;
     this.currentServer = null;
     this.client = null;
+    // 清除敏感信息
+    getSanitizer().clearSensitiveValues();
+  }
+
+  /**
+   * 注册服务器配置中的敏感信息
+   */
+  private registerSensitiveInfo(config: ServerConfig): void {
+    const sanitizer = getSanitizer();
+    sanitizer.addSensitiveValues([
+      config.host,
+      config.password,
+      config.passphrase,
+      config.username,
+      config.privateKeyPath,
+    ]);
   }
 
   getShellManager(): ShellManager {

@@ -3,6 +3,19 @@ import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { SSHManager } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
+import { sanitize } from "./sanitizer.js";
+import { ShellResult } from "./types.js";
+
+/**
+ * 过滤 ShellResult 中的敏感信息
+ */
+function sanitizeResult(result: ShellResult): ShellResult {
+  return {
+    ...result,
+    output: sanitize(result.output),
+    message: sanitize(result.message),
+  };
+}
 
 export function registerTools(
   server: McpServer,
@@ -72,7 +85,7 @@ export function registerTools(
           }
 
           const shellManager = sshManager.getShellManager();
-          const result = await shellManager.send(command);
+          const result = sanitizeResult(await shellManager.send(command));
 
           return {
             content: [{
@@ -301,7 +314,7 @@ ssh_shell({ action: "send", input: ":wq" })  # 保存退出
               };
             }
 
-            const result = await shellManager.send(input);
+            const result = sanitizeResult(await shellManager.send(input));
 
             return {
               content: [{
@@ -317,7 +330,7 @@ ssh_shell({ action: "send", input: ":wq" })  # 保存退出
           }
 
           case "read": {
-            const result = shellManager.read(lines, offset, clear);
+            const result = sanitizeResult(shellManager.read(lines, offset, clear));
 
             return {
               content: [{
