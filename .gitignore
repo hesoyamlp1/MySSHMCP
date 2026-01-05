@@ -47,6 +47,9 @@ Desktop.ini
 servers.json
 .claude/ssh-servers.json
 
+# MCP 本地配置（不跨平台）
+.mcp.json
+
 # ==================== 测试和调试 ====================
 # 保留测试文件，但忽略测试生成的数据
 test-results/

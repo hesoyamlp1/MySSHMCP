@@ -111,6 +111,9 @@ export class ShellManager {
 
   /**
    * 读取缓冲区内容
+   * @param lines 返回行数：不传默认 20 行，-1 返回全部，正整数返回对应行数
+   * @param offset 起始偏移，默认 0
+   * @param clear 读取后是否清空缓冲区
    */
   read(
     lines?: number,
@@ -118,12 +121,15 @@ export class ShellManager {
     clear?: boolean
   ): ShellResult {
     const startIdx = offset || 0;
-    const endIdx = lines ? startIdx + lines : this.outputLines.length;
+
+    // 处理 lines 参数：undefined 默认 20，-1 返回全部，其他返回指定行数
+    const effectiveLines = lines === undefined ? 20 : (lines === -1 ? undefined : lines);
+    const endIdx = effectiveLines ? startIdx + effectiveLines : this.outputLines.length;
     const selectedLines = this.outputLines.slice(startIdx, endIdx);
 
     // 包含不完整的最后一行
     let output = selectedLines.join("\n");
-    if (this.outputBuffer && (!lines || endIdx >= this.outputLines.length)) {
+    if (this.outputBuffer && (!effectiveLines || endIdx >= this.outputLines.length)) {
       output += (output ? "\n" : "") + this.outputBuffer;
     }
 

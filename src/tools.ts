@@ -207,7 +207,7 @@ export function registerTools(
 - 查看持续运行命令的最新输出
 - 分页读取大量输出
 参数：
-- lines: 返回行数（默认全部）
+- lines: 返回行数（默认 20 行，-1 返回全部）
 - offset: 起始偏移（默认 0）
 - clear: 读取后清空缓冲区（默认 false）
 
@@ -269,7 +269,7 @@ ssh_shell({ action: "send", input: ":wq" })  # 保存退出
           .enum(["SIGINT", "SIGTSTP", "SIGQUIT"])
           .optional()
           .describe("signal 时的信号类型：SIGINT(Ctrl+C)/SIGTSTP(Ctrl+Z)/SIGQUIT"),
-        lines: z.number().optional().describe("read 时返回的行数，默认全部"),
+        lines: z.number().optional().describe("read 时返回的行数，默认 20 行，-1 返回全部"),
         offset: z.number().optional().describe("read 时的起始行偏移，默认 0"),
         clear: z.boolean().optional().describe("read 后是否清空缓冲区，默认 false"),
       },

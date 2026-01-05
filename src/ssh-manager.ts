@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { ServerConfig, ConnectionStatus } from "./types.js";
 import { ShellManager } from "./shell-manager.js";
+import { getSanitizer } from "./sanitizer.js";
 
 export class SSHManager {
   private client: Client | null = null;
@@ -33,6 +34,9 @@ export class SSHManager {
       this.client.on("ready", async () => {
         this.isConnected = true;
         this.currentServer = config;
+
+        // 注册敏感信息到过滤器
+        this.registerSensitiveInfo(config);
 
         // 连接成功后自动打开 shell
         try {
