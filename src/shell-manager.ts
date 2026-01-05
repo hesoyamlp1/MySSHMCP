@@ -314,8 +314,14 @@ export class ShellManager {
         const currentOutput = newLines.join("\n") +
           (this.outputBuffer ? "\n" + this.outputBuffer : "");
 
-        const lastLine = this.outputBuffer ||
+        // 获取最后一行用于提示符检测
+        // 处理 \r（回车）：取最后一个 \r 后面的内容，因为那才是当前可见的行
+        let lastLine = this.outputBuffer ||
           (newLines.length > 0 ? newLines[newLines.length - 1] : "");
+        const lastCR = lastLine.lastIndexOf("\r");
+        if (lastCR !== -1) {
+          lastLine = lastLine.slice(lastCR + 1);
+        }
         const hasPrompt = this.detectPrompt(lastLine);
 
         // 检测输出是否稳定（连续 3 次检查没有新输出）
@@ -396,8 +402,13 @@ export class ShellManager {
    * 私有方法：检测提示符
    */
   private detectPrompt(line: string): boolean {
-    // 移除 ANSI 转义序列
-    const cleanLine = line.replace(/\x1b\[[0-9;]*m/g, "").trim();
+    // 移除 ANSI 转义序列（更完整的正则）
+    const cleanLine = line
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")  // 标准 ANSI 序列
+      .replace(/\x1b\][^\x07]*\x07/g, "")      // OSC 序列 (如 \e]2;...\a)
+      .replace(/\x1b\][^\x1b]*\x1b\\/g, "")    // OSC 序列 (如 \e]7;...\e\)
+      .replace(/[\x00-\x1f]/g, "")             // 其他控制字符
+      .trim();
 
     if (!cleanLine) return false;
 
@@ -411,6 +422,10 @@ export class ShellManager {
       /\)\s*[$#>]\s*$/,   // )$ 或 )# 结尾（一些自定义 PS1）
       /~\s*[$#>]\s*$/,    // ~$ 结尾
       /@.*:\s*[$#>]\s*$/, // user@host: $ 格式
+      /^➜\s+/,            // oh-my-zsh robbyrussell 主题 (➜ 开头)
+      /❯\s*$/,            // pure/starship 主题
+      /λ\s*$/,            // lambda 主题
+      /^\s*%\s*$/,        // zsh 默认提示符
     ];
 
     return patterns.some((p) => p.test(cleanLine));
