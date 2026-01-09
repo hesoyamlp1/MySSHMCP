@@ -585,7 +585,7 @@ export function createCLI(): Command {
     .option("-l, --local", "保存到项目级别")
     .option("-g, --global", "保存到用户级别")
     .option("-H, --host <host>", "主机地址")
-    .option("-P, --port <port>", "端口", "22")
+    .option("-P, --port <port>", "端口")
     .option("-u, --user <user>", "用户名")
     .option("-p, --password <password>", "密码")
     .option("-k, --key <path>", "私钥路径")
