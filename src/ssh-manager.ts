@@ -116,6 +116,8 @@ export class SSHManager {
         host: config.host,
         port: config.port || 22,
         username: config.username,
+        keepaliveInterval: 10000,   // 每 10 秒发送心跳
+        keepaliveCountMax: 3,       // 3 次无响应才断开
       };
 
       // 如果有代理，使用代理 socket

@@ -100,6 +100,9 @@ async function addServer(name?: string, options?: {
   passphrase?: string;
   local?: boolean;
   global?: boolean;
+  proxyHost?: string;
+  proxyPort?: string;
+  proxyType?: string;
 }): Promise<void> {
   // 确定配置级别
   let scope: ConfigScope | undefined;
@@ -207,6 +210,63 @@ async function addServer(name?: string, options?: {
     server.password = authPassword;
   }
 
+  // 代理配置
+  const hasProxyOptions = !!(options?.proxyHost || options?.proxyPort);
+  let useProxy = hasProxyOptions;
+
+  if (!hasProxyOptions) {
+    useProxy = await confirm({
+      message: "是否使用代理连接?",
+      default: false,
+    });
+  }
+
+  if (useProxy) {
+    const proxyHost = options?.proxyHost || await input({
+      message: "代理地址:",
+      default: "127.0.0.1",
+    });
+
+    const proxyPort = options?.proxyPort
+      ? parseInt(options.proxyPort)
+      : parseInt(await input({
+          message: "代理端口:",
+          default: "10809",
+        })) || 10809;
+
+    const proxyType = options?.proxyType
+      ? (parseInt(options.proxyType) as 4 | 5)
+      : await select({
+          message: "代理类型:",
+          choices: [
+            { name: "SOCKS5", value: 5 as const },
+            { name: "SOCKS4", value: 4 as const },
+          ],
+        });
+
+    server.proxy = {
+      host: proxyHost,
+      port: proxyPort,
+      type: proxyType,
+    };
+
+    if (!hasProxyOptions) {
+      const proxyNeedAuth = await confirm({
+        message: "代理是否需要认证?",
+        default: false,
+      });
+
+      if (proxyNeedAuth) {
+        server.proxy.username = await input({
+          message: "代理用户名:",
+        });
+        server.proxy.password = await password({
+          message: "代理密码:",
+        });
+      }
+    }
+  }
+
   // 检查是否已存在
   const existing = configManager.getServer(serverName);
   if (existing) {
@@ -305,6 +365,9 @@ async function testServer(name?: string, options?: { local?: boolean; global?: b
   }
 
   console.log(`\n测试连接到 '${serverName}'...`);
+  if (server.proxy) {
+    console.log(`  通过代理: ${server.proxy.host}:${server.proxy.port} (SOCKS${server.proxy.type || 5})`);
+  }
 
   const sshManager = new SSHManager();
 
@@ -465,6 +528,9 @@ async function interactiveConfig(): Promise<void> {
         const server = configManager.getServer(testName);
         if (server) {
           console.log(`\n测试连接到 '${testName}'...`);
+          if (server.proxy) {
+            console.log(`  通过代理: ${server.proxy.host}:${server.proxy.port} (SOCKS${server.proxy.type || 5})`);
+          }
           const sshManager = new SSHManager();
           try {
             await sshManager.connect(server);
@@ -642,6 +708,9 @@ export function createCLI(): Command {
     .option("-p, --password <password>", "密码")
     .option("-k, --key <path>", "私钥路径")
     .option("--passphrase <passphrase>", "私钥密码")
+    .option("--proxy-host <host>", "代理地址")
+    .option("--proxy-port <port>", "代理端口")
+    .option("--proxy-type <type>", "代理类型 (4 或 5)")
     .action(addServer);
 
   program
