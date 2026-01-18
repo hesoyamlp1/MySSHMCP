@@ -13,6 +13,18 @@
       "port": 22,
       "username": "ubuntu",
       "password": "your-password"
+    },
+    {
+      "name": "server-via-proxy",
+      "host": "remote.example.com",
+      "port": 22,
+      "username": "user",
+      "privateKeyPath": "~/.ssh/id_rsa",
+      "proxy": {
+        "host": "127.0.0.1",
+        "port": 10809,
+        "type": 5
+      }
     }
   ]
 }

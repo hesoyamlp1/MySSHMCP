@@ -4,7 +4,7 @@ import { Command } from "commander";
 import { select, input, password, confirm } from "@inquirer/prompts";
 import { ConfigManager, ConfigScope } from "./config.js";
 import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
-import { ServerConfig } from "./types.js";
+import { ServerConfig, ProxyConfig } from "./types.js";
 
 /**
  * 获取 ConfigManager 实例
@@ -18,7 +18,8 @@ function getConfigManager(scope?: ConfigScope): ConfigManager {
  */
 function formatServer(server: ServerConfig): string {
   const auth = server.privateKeyPath ? `key:${server.privateKeyPath}` : "password";
-  return `${server.name} (${server.username}@${server.host}:${server.port || 22}) [${auth}]`;
+  const proxy = server.proxy ? ` [proxy:${server.proxy.host}:${server.proxy.port}]` : "";
+  return `${server.name} (${server.username}@${server.host}:${server.port || 22}) [${auth}]${proxy}`;
 }
 
 /**
@@ -407,6 +408,9 @@ async function interactiveConfig(): Promise<void> {
           console.log(`  端口: ${server.port || 22}`);
           console.log(`  用户: ${server.username}`);
           console.log(`  认证: ${server.privateKeyPath ? `私钥(${server.privateKeyPath})` : "密码"}`);
+          if (server.proxy) {
+            console.log(`  代理: ${server.proxy.host}:${server.proxy.port} (SOCKS${server.proxy.type || 5})`);
+          }
           console.log("\n重新输入新配置:\n");
 
           await addServerToManager(configManager, server.name);
@@ -554,6 +558,54 @@ async function addServerToManager(configManager: ConfigManager, existingName?: s
     server.password = await password({
       message: "登录密码:",
     });
+  }
+
+  // 代理配置
+  const useProxy = await confirm({
+    message: "是否使用代理连接?",
+    default: false,
+  });
+
+  if (useProxy) {
+    const proxyHost = await input({
+      message: "代理地址:",
+      default: "127.0.0.1",
+    });
+
+    const proxyPortStr = await input({
+      message: "代理端口:",
+      default: "10809",
+    });
+    const proxyPort = parseInt(proxyPortStr) || 10809;
+
+    const proxyType = await select({
+      message: "代理类型:",
+      choices: [
+        { name: "SOCKS5", value: 5 as const },
+        { name: "SOCKS4", value: 4 as const },
+      ],
+    });
+
+    server.proxy = {
+      host: proxyHost,
+      port: proxyPort,
+      type: proxyType,
+    };
+
+    // 代理认证（可选）
+    const proxyNeedAuth = await confirm({
+      message: "代理是否需要认证?",
+      default: false,
+    });
+
+    if (proxyNeedAuth) {
+      server.proxy.username = await input({
+        message: "代理用户名:",
+      });
+      server.proxy.password = await password({
+        message: "代理密码:",
+      });
+    }
   }
 
   configManager.addServer(server);
