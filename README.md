@@ -64,8 +64,8 @@ mcp-ssh-pty config
 
 | Level | Path | Priority |
 |-------|------|----------|
-| Project | `./.claude/ssh-servers.json` | High |
-| User | `~/.claude/ssh-servers.json` | Low |
+| Project | `./.linMCP/ssh-servers.json` | High |
+| User | `~/.linMCP/ssh-servers.json` | Low |
 | Custom | `SSH_MCP_CONFIG_PATH` env | Highest |
 
 ### Config format

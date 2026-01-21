@@ -3,7 +3,11 @@
     "allow": [
       "mcp__ssh__ssh",
       "Bash(npm view:*)",
-      "Bash(node dist/index.js:*)"
+      "Bash(node dist/index.js:*)",
+      "WebSearch",
+      "WebFetch(domain:help.router-for.me)",
+      "WebFetch(domain:vnrom.net)",
+      "Bash(curl:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

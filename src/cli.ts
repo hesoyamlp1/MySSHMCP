@@ -111,8 +111,8 @@ async function addServer(name?: string, options?: {
     scope = await select({
       message: "保存到哪个级别?",
       choices: [
-        { name: "📁 项目级别 (当前目录/.claude/)", value: "local" as ConfigScope },
-        { name: "🌐 用户级别 (~/.claude/)", value: "global" as ConfigScope },
+        { name: "📁 项目级别 (当前目录/.linMCP/)", value: "local" as ConfigScope },
+        { name: "🌐 用户级别 (~/.linMCP/)", value: "global" as ConfigScope },
       ],
     });
   }

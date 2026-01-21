@@ -26,17 +26,17 @@ export class ConfigManager {
 
   private getPathByScope(scope: ConfigScope): string {
     if (scope === "local") {
-      return join(process.cwd(), ".claude", "ssh-servers.json");
+      return join(process.cwd(), ".linMCP", "ssh-servers.json");
     }
-    return join(homedir(), ".claude", "ssh-servers.json");
+    return join(homedir(), ".linMCP", "ssh-servers.json");
   }
 
   static getLocalPath(): string {
-    return join(process.cwd(), ".claude", "ssh-servers.json");
+    return join(process.cwd(), ".linMCP", "ssh-servers.json");
   }
 
   static getGlobalPath(): string {
-    return join(homedir(), ".claude", "ssh-servers.json");
+    return join(homedir(), ".linMCP", "ssh-servers.json");
   }
 
   private resolveConfigPath(): { path: string; scope: ConfigScope } {
@@ -48,15 +48,15 @@ export class ConfigManager {
       };
     }
 
-    // 2. 查找项目目录下的 .claude/ssh-servers.json
-    const projectPath = join(process.cwd(), ".claude", "ssh-servers.json");
+    // 2. 查找项目目录下的 .linMCP/ssh-servers.json
+    const projectPath = join(process.cwd(), ".linMCP", "ssh-servers.json");
     if (existsSync(projectPath)) {
       return { path: projectPath, scope: "local" };
     }
 
-    // 3. 查找用户目录下的 ~/.claude/ssh-servers.json
+    // 3. 查找用户目录下的 ~/.linMCP/ssh-servers.json
     return {
-      path: join(homedir(), ".claude", "ssh-servers.json"),
+      path: join(homedir(), ".linMCP", "ssh-servers.json"),
       scope: "global",
     };
   }
