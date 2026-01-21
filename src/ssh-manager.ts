@@ -2,7 +2,8 @@ import { Client } from "ssh2";
 import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { ServerConfig, ConnectionStatus } from "./types.js";
+import { SocksClient } from "socks";
+import { ServerConfig, ConnectionStatus, ProxyConfig } from "./types.js";
 import { ShellManager } from "./shell-manager.js";
 import { getSanitizer } from "./sanitizer.js";
 
@@ -71,6 +72,16 @@ export class SSHManager {
    * SSH 远程连接
    */
   private async connectSSH(config: ServerConfig): Promise<void> {
+    // 如果配置了代理，先建立代理连接
+    let proxySocket: ReturnType<typeof SocksClient.createConnection> extends Promise<infer T> ? T : never;
+    if (config.proxy) {
+      try {
+        proxySocket = await this.createProxyConnection(config.proxy, config.host, config.port || 22);
+      } catch (error) {
+        throw new Error(`代理连接失败: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+
     return new Promise((resolve, reject) => {
       this.client = new Client();
 
@@ -105,7 +116,14 @@ export class SSHManager {
         host: config.host,
         port: config.port || 22,
         username: config.username,
+        keepaliveInterval: 10000,   // 每 10 秒发送心跳
+        keepaliveCountMax: 3,       // 3 次无响应才断开
       };
+
+      // 如果有代理，使用代理 socket
+      if (proxySocket) {
+        connectConfig.sock = proxySocket.socket;
+      }
 
       if (config.privateKeyPath) {
         try {
@@ -126,6 +144,26 @@ export class SSHManager {
       }
 
       this.client.connect(connectConfig);
+    });
+  }
+
+  /**
+   * 通过 SOCKS 代理创建连接
+   */
+  private async createProxyConnection(proxy: ProxyConfig, destHost: string, destPort: number) {
+    return SocksClient.createConnection({
+      proxy: {
+        host: proxy.host,
+        port: proxy.port,
+        type: proxy.type || 5,
+        userId: proxy.username,
+        password: proxy.password,
+      },
+      command: "connect",
+      destination: {
+        host: destHost,
+        port: destPort,
+      },
     });
   }
 

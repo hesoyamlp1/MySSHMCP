@@ -1,3 +1,11 @@
+export interface ProxyConfig {
+  host: string;
+  port: number;
+  type?: 4 | 5;  // SOCKS4 或 SOCKS5，默认 5
+  username?: string;
+  password?: string;
+}
+
 export interface ServerConfig {
   name: string;
   host: string;
@@ -6,6 +14,7 @@ export interface ServerConfig {
   password?: string;
   privateKeyPath?: string;
   passphrase?: string;
+  proxy?: ProxyConfig;
 }
 
 export interface ServersConfig {
