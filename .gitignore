@@ -54,3 +54,4 @@ servers.json
 # 保留测试文件，但忽略测试生成的数据
 test-results/
 coverage/
+.claude/

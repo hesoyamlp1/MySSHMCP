@@ -341,30 +341,37 @@ async function testServer(name?: string, options?: { local?: boolean; global?: b
   const configManager = getConfigManager(scope);
   const servers = configManager.listServers();
 
-  if (servers.length === 0) {
-    console.log("没有配置任何服务器");
-    return;
-  }
-
   let serverName = name;
 
   if (!serverName) {
-    serverName = await select({
-      message: "选择要测试的服务器:",
-      choices: servers.map((s) => ({
+    const choices = [
+      { name: "local (本地 shell)", value: "local" },
+      ...servers.map((s) => ({
         name: formatServer(s),
         value: s.name,
       })),
+    ];
+
+    serverName = await select({
+      message: "选择要测试的服务器:",
+      choices,
     });
   }
 
-  const server = configManager.getServer(serverName);
+  const server = serverName === "local" ? LOCAL_SERVER : configManager.getServer(serverName);
   if (!server) {
-    console.log(`服务器 '${serverName}' 不存在`);
+    if (servers.length === 0) {
+      console.log("没有配置任何服务器");
+    } else {
+      console.log(`服务器 '${serverName}' 不存在`);
+    }
     return;
   }
 
   console.log(`\n测试连接到 '${serverName}'...`);
+  if (serverName === "local") {
+    console.log("  使用内置本地 shell");
+  }
   if (server.proxy) {
     console.log(`  通过代理: ${server.proxy.host}:${server.proxy.port} (SOCKS${server.proxy.type || 5})`);
   }
