@@ -1,17 +1,27 @@
-# mcp-ssh-pty
+# @mori-mori/mcp-ssh-pty
 
 MCP Server for SSH remote command execution with PTY shell support.
 
 ## Installation
 
 ```bash
-npm install -g mcp-ssh-pty
+npm install -g @mori-mori/mcp-ssh-pty
+```
+
+### Start MCP Server
+
+```bash
+mcp-ssh-pty
 ```
 
 ### Add to Claude Code
 
 ```bash
-claude mcp add --transport stdio ssh -- npx -y mcp-ssh-pty
+# 全局安装后
+claude mcp add --transport stdio ssh -- mcp-ssh-pty
+
+# 或使用 npx（无需安装）
+claude mcp add --transport stdio ssh -- npx -y @mori-mori/mcp-ssh-pty
 ```
 
 ## CLI Commands
@@ -64,8 +74,8 @@ mcp-ssh-pty config
 
 | Level | Path | Priority |
 |-------|------|----------|
-| Project | `./.linMCP/ssh-servers.json` | High |
-| User | `~/.linMCP/ssh-servers.json` | Low |
+| Project | `./.mori/ssh-servers.json` | High |
+| User | `~/.mori/ssh-servers.json` | Low |
 | Custom | `SSH_MCP_CONFIG_PATH` env | Highest |
 
 ### Config format
