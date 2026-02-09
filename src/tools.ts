@@ -5,6 +5,7 @@ import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
 import { sanitize } from "./sanitizer.js";
 import { ShellResult } from "./types.js";
+import { saveIfLarge } from "./output-store.js";
 
 /**
  * 过滤 ShellResult 中的敏感信息
@@ -15,6 +16,32 @@ function sanitizeResult(result: ShellResult): ShellResult {
     output: sanitize(result.output),
     message: sanitize(result.message),
   };
+}
+
+/**
+ * 检查输出是否过大，如果过大则保存到本地文件并截断返回
+ */
+function truncateIfLarge(resultObj: Record<string, unknown>): string {
+  const json = JSON.stringify(resultObj, null, 2);
+  const output = resultObj.output as string | undefined;
+
+  if (!output) return json;
+
+  const saveResult = saveIfLarge(output);
+  if (!saveResult.saved) return json;
+
+  // 替换 output 为尾部摘要 + 提示
+  const truncated = {
+    ...resultObj,
+    output: saveResult.tail,
+    _overflow: {
+      totalChars: saveResult.totalChars,
+      savedTo: saveResult.filePath,
+      hint: `⚠️ 输出过长（共 ${saveResult.totalChars} 字符），已保存完整内容至: ${saveResult.filePath}。当前仅显示最后 2000 字符。如需查看完整内容，请使用 Read 工具读取该文件，或使用 Grep 工具搜索关键内容。`,
+    },
+  };
+
+  return JSON.stringify(truncated, null, 2);
 }
 
 export function registerTools(
@@ -76,7 +103,12 @@ ssh({ command: "SHOW DATABASES;" })     # 执行 SQL
 ### 信号控制
 ssh({ command: "tail -f /var/log/syslog" })
 ssh({ read: true })                     # 查看输出
-ssh({ signal: "SIGINT" })               # Ctrl+C 停止`,
+ssh({ signal: "SIGINT" })               # Ctrl+C 停止
+
+## 安全说明
+- 输出中的 IP 地址会被替换为 [IP]，密码等敏感信息会被替换为 [REDACTED]
+- 这是系统自动脱敏处理，不影响实际命令执行
+- 如输出过长（超过 8000 字符），完整内容会保存到本地文件，仅返回尾部摘要`,
       inputSchema: {
         action: z
           .enum(["list", "connect", "disconnect", "status"])
@@ -134,10 +166,10 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止`,
           return {
             content: [{
               type: "text",
-              text: JSON.stringify({
+              text: truncateIfLarge({
                 server: status.serverName,
                 ...result,
-              }, null, 2),
+              }),
             }],
           };
         }
@@ -158,11 +190,11 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止`,
           return {
             content: [{
               type: "text",
-              text: JSON.stringify({
+              text: truncateIfLarge({
                 server: status.serverName,
                 command,
                 ...result,
-              }, null, 2),
+              }),
             }],
             isError: !result.complete && !result.waiting,
           };
