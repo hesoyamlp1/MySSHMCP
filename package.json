@@ -1,6 +1,6 @@
 {
   "name": "@mori-mori/mcp-ssh-pty",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "MCP Server for SSH remote command execution with PTY shell support",
   "type": "module",
   "main": "dist/index.js",
