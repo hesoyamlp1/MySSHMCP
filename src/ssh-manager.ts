@@ -197,6 +197,8 @@ export class SSHManager {
       config.passphrase,
       config.username,
       config.privateKeyPath,
+      config.proxy?.host,
+      config.proxy?.password,
     ]);
   }
 

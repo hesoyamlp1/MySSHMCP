@@ -9,28 +9,71 @@ export interface SensitivePattern {
   description: string;
 }
 
+// 不需要脱敏的本地回环 / 保留地址
+const WHITELISTED_IPS = new Set([
+  "127.0.0.1",
+  "0.0.0.0",
+  "255.255.255.255",
+  "::1",
+  "::",
+]);
+
 export class Sanitizer {
   private sensitiveValues: Set<string> = new Set();
   private patterns: SensitivePattern[] = [];
+  private whitelist: Set<string>;
 
   constructor() {
-    // 内置通用模式
+    this.whitelist = new Set(WHITELISTED_IPS);
+
+    // 内置通用模式 ——
+    // 注意：更具体的模式排在前面，避免被通用模式提前匹配
+
+    // IPv4-mapped IPv6: ::ffff:192.168.1.1 (必须在 IPv4 之前)
     this.addPattern({
-      pattern: /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g,
-      replacement: "[IP]",
-      description: "IPv4 地址",
+      pattern: /::ffff:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/gi,
+      replacement: "[IPv6]",
+      description: "IPv4-mapped IPv6 地址",
     });
 
+    // MAC 地址: aa:bb:cc:dd:ee:ff 或 AA-BB-CC-DD-EE-FF (必须在 IPv6 之前，避免误匹配)
+    this.addPattern({
+      pattern: /\b([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b/g,
+      replacement: "[MAC]",
+      description: "MAC 地址",
+    });
+
+    // IPv6 完整形式: 2001:0db8:85a3:0000:0000:8a2e:0370:7334
     this.addPattern({
       pattern: /\b([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b/g,
       replacement: "[IPv6]",
-      description: "IPv6 地址",
+      description: "IPv6 完整地址",
+    });
+
+    // IPv6 缩写形式 (含 ::)
+    this.addPattern({
+      pattern: /\b([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}\b/g,
+      replacement: "[IPv6]",
+      description: "IPv6 缩写 (前缀::后缀)",
     });
 
     this.addPattern({
-      pattern: /\b([0-9a-fA-F]{1,4}:){1,7}:\b/g,
+      pattern: /\b([0-9a-fA-F]{1,4}:){1,7}:/g,
       replacement: "[IPv6]",
-      description: "IPv6 简写",
+      description: "IPv6 缩写 (前缀::)",
+    });
+
+    this.addPattern({
+      pattern: /::([0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4}\b/g,
+      replacement: "[IPv6]",
+      description: "IPv6 缩写 (::后缀)",
+    });
+
+    // IPv4 地址（放在最后，避免抢先匹配 IPv4-mapped IPv6 中的 IP 部分）
+    this.addPattern({
+      pattern: /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g,
+      replacement: "[IP]",
+      description: "IPv4 地址",
     });
   }
 
@@ -68,6 +111,13 @@ export class Sanitizer {
   }
 
   /**
+   * 添加白名单地址（不会被脱敏）
+   */
+  addWhitelist(value: string): void {
+    this.whitelist.add(value);
+  }
+
+  /**
    * 过滤文本中的敏感信息
    */
   sanitize(text: string): string {
@@ -87,11 +137,17 @@ export class Sanitizer {
       result = result.replace(regex, "[REDACTED]");
     }
 
-    // 2. 应用正则模式
+    // 2. 应用正则模式（支持白名单）
     for (const { pattern, replacement } of this.patterns) {
       // 重置正则状态（因为使用了 /g 标志）
       pattern.lastIndex = 0;
-      result = result.replace(pattern, replacement);
+      result = result.replace(pattern, (match) => {
+        // 白名单中的地址不脱敏
+        if (this.whitelist.has(match)) {
+          return match;
+        }
+        return replacement;
+      });
     }
 
     return result;

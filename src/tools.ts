@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResult, TextContent } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
@@ -16,6 +16,22 @@ function sanitizeResult(result: ShellResult): ShellResult {
     output: sanitize(result.output),
     message: sanitize(result.message),
   };
+}
+
+/**
+ * 统一过滤 CallToolResult 中所有 text 内容
+ * 作为最终出口的安全网，确保不会遗漏任何返回路径
+ */
+function sanitizeToolResult(result: CallToolResult): CallToolResult {
+  return {
+    ...result,
+    content: result.content.map((c: { type: string; text?: string }) => {
+      if (c.type === "text" && typeof c.text === "string") {
+        return { ...c, text: sanitize(c.text) };
+      }
+      return c;
+    }),
+  } as CallToolResult;
 }
 
 /**
@@ -132,38 +148,38 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
         if (signal) {
           const status = sshManager.getStatus();
           if (!status.connected) {
-            return {
+            return sanitizeToolResult({
               content: [{ type: "text", text: "未连接服务器" }],
               isError: true,
-            };
+            });
           }
 
           const shellManager = sshManager.getShellManager();
           const success = shellManager.sendSignal(signal);
 
-          return {
+          return sanitizeToolResult({
             content: [{
               type: "text",
               text: success ? `已发送 ${signal}` : `发送 ${signal} 失败`,
             }],
             isError: !success,
-          };
+          });
         }
 
         // 2. 读取缓冲区
         if (read) {
           const status = sshManager.getStatus();
           if (!status.connected) {
-            return {
+            return sanitizeToolResult({
               content: [{ type: "text", text: "未连接服务器" }],
               isError: true,
-            };
+            });
           }
 
           const shellManager = sshManager.getShellManager();
           const result = sanitizeResult(shellManager.read(lines, offset, clear));
 
-          return {
+          return sanitizeToolResult({
             content: [{
               type: "text",
               text: truncateIfLarge({
@@ -171,23 +187,23 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
                 ...result,
               }),
             }],
-          };
+          });
         }
 
         // 3. 执行命令
         if (command) {
           const status = sshManager.getStatus();
           if (!status.connected) {
-            return {
+            return sanitizeToolResult({
               content: [{ type: "text", text: "未连接服务器，请先使用 ssh({ action: 'connect', server: '服务器名' }) 连接" }],
               isError: true,
-            };
+            });
           }
 
           const shellManager = sshManager.getShellManager();
           const result = sanitizeResult(await shellManager.send(command));
 
-          return {
+          return sanitizeToolResult({
             content: [{
               type: "text",
               text: truncateIfLarge({
@@ -197,7 +213,7 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
               }),
             }],
             isError: !result.complete && !result.waiting,
-          };
+          });
         }
 
         // 4. 连接管理操作
@@ -222,66 +238,66 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
               })),
             ];
 
-            return {
+            return sanitizeToolResult({
               content: [{ type: "text", text: JSON.stringify(list, null, 2) }],
-            };
+            });
           }
 
           case "connect": {
             if (!serverName) {
-              return {
+              return sanitizeToolResult({
                 content: [{ type: "text", text: "缺少 server 参数" }],
                 isError: true,
-              };
+              });
             }
 
             // 检查是否是本地连接
             if (serverName === "local") {
               await sshManager.connect(LOCAL_SERVER);
-              return {
+              return sanitizeToolResult({
                 content: [{
                   type: "text",
                   text: "成功连接到本地 Shell",
                 }],
-              };
+              });
             }
 
             const serverConfig = configManager.getServer(serverName);
             if (!serverConfig) {
               const available = ["local", ...configManager.listServers().map((s) => s.name)];
-              return {
+              return sanitizeToolResult({
                 content: [{
                   type: "text",
                   text: `服务器 '${serverName}' 不存在。可用服务器: ${available.join(", ")}`,
                 }],
                 isError: true,
-              };
+              });
             }
 
             await sshManager.connect(serverConfig);
 
-            return {
+            return sanitizeToolResult({
               content: [{
                 type: "text",
                 text: `成功连接到 '${serverName}'，PTY Shell 已就绪`,
               }],
-            };
+            });
           }
 
           case "disconnect": {
             const status = sshManager.getStatus();
             if (!status.connected) {
-              return {
+              return sanitizeToolResult({
                 content: [{ type: "text", text: "当前没有活跃的连接" }],
-              };
+              });
             }
 
             const name = status.serverName;
             await sshManager.disconnect();
 
-            return {
+            return sanitizeToolResult({
               content: [{ type: "text", text: `已断开与 '${name}' 的连接` }],
-            };
+            });
           }
 
           case "status": {
@@ -289,7 +305,7 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
             const shellManager = sshManager.getShellManager();
 
             if (status.connected) {
-              return {
+              return sanitizeToolResult({
                 content: [{
                   type: "text",
                   text: JSON.stringify({
@@ -299,20 +315,20 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
                     bufferLines: shellManager.getBufferLineCount(),
                   }, null, 2),
                 }],
-              };
+              });
             } else {
-              return {
+              return sanitizeToolResult({
                 content: [{ type: "text", text: JSON.stringify({ connected: false }, null, 2) }],
-              };
+              });
             }
           }
         }
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        return {
+        return sanitizeToolResult({
           content: [{ type: "text", text: `错误: ${message}` }],
           isError: true,
-        };
+        });
       }
     }
   );
