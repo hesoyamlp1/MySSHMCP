@@ -44,6 +44,7 @@ Desktop.ini
 
 # ==================== SSH MCP ====================
 # 服务器配置文件（包含敏感信息）
+.mori/
 servers.json
 .claude/ssh-servers.json
 

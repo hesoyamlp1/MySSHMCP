@@ -5,6 +5,7 @@ import { join } from "path";
 import { SocksClient } from "socks";
 import { ServerConfig, ConnectionStatus, ProxyConfig } from "./types.js";
 import { ShellManager } from "./shell-manager.js";
+import { SFTPManager } from "./sftp-manager.js";
 import { getSanitizer } from "./sanitizer.js";
 
 // 内置的本地服务器配置
@@ -20,10 +21,12 @@ export class SSHManager {
   private currentServer: ServerConfig | null = null;
   private isConnected: boolean = false;
   private shellManager: ShellManager;
+  private sftpManager: SFTPManager;
   private isLocalConnection: boolean = false;
 
   constructor() {
     this.shellManager = new ShellManager();
+    this.sftpManager = new SFTPManager();
   }
 
   private expandPath(path: string): string {
@@ -168,7 +171,8 @@ export class SSHManager {
   }
 
   async disconnect(): Promise<void> {
-    // 先关闭 shell
+    // 先关闭 SFTP 和 shell
+    this.sftpManager.close();
     this.shellManager.close();
 
     if (this.client && this.isConnected && !this.isLocalConnection) {
@@ -178,6 +182,7 @@ export class SSHManager {
   }
 
   private cleanup(): void {
+    this.sftpManager.close();
     this.isConnected = false;
     this.isLocalConnection = false;
     this.currentServer = null;
@@ -202,8 +207,16 @@ export class SSHManager {
     ]);
   }
 
+  getClient(): Client | null {
+    return this.client;
+  }
+
   getShellManager(): ShellManager {
     return this.shellManager;
+  }
+
+  getSftpManager(): SFTPManager {
+    return this.sftpManager;
   }
 
   isLocal(): boolean {

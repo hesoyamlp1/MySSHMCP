@@ -332,4 +332,80 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
       }
     }
   );
+
+  // SFTP 文件传输工具
+  server.registerTool(
+    "sftp",
+    {
+      description: `通过 SFTP 在本地和远程服务器之间传输文件。
+
+需要先通过 ssh 工具连接服务器后才能使用。SFTP 通道会在首次调用时自动创建。
+
+## 操作
+- upload: 上传本地文件到远程服务器
+- download: 从远程服务器下载文件到本地
+
+## 使用示例
+sftp({ action: "upload", localPath: "/tmp/config.json", remotePath: "/home/user/config.json" })
+sftp({ action: "download", remotePath: "/var/log/app.log", localPath: "/tmp/app.log" })
+
+## 注意
+- 目录列表、文件删除、创建目录等操作请直接通过 ssh 工具执行 shell 命令
+- 本地连接（local）不支持 SFTP`,
+      inputSchema: {
+        action: z
+          .enum(["upload", "download"])
+          .describe("传输操作：upload 上传 / download 下载"),
+        localPath: z.string().describe("本地文件路径"),
+        remotePath: z.string().describe("远程文件路径"),
+      },
+    },
+    async ({ action, localPath, remotePath }): Promise<CallToolResult> => {
+      try {
+        const status = sshManager.getStatus();
+        if (!status.connected) {
+          return sanitizeToolResult({
+            content: [{ type: "text", text: "未连接服务器，请先使用 ssh({ action: 'connect', server: '服务器名' }) 连接" }],
+            isError: true,
+          });
+        }
+
+        if (sshManager.isLocal()) {
+          return sanitizeToolResult({
+            content: [{ type: "text", text: "本地连接不支持 SFTP，请连接远程服务器后使用" }],
+            isError: true,
+          });
+        }
+
+        const client = sshManager.getClient();
+        if (!client) {
+          return sanitizeToolResult({
+            content: [{ type: "text", text: "SSH Client 不可用" }],
+            isError: true,
+          });
+        }
+
+        const sftpManager = sshManager.getSftpManager();
+
+        if (action === "upload") {
+          const result = await sftpManager.upload(client, localPath, remotePath);
+          return sanitizeToolResult({
+            content: [{ type: "text", text: result }],
+          });
+        } else {
+          const result = await sftpManager.download(client, remotePath, localPath);
+          return sanitizeToolResult({
+            content: [{ type: "text", text: result }],
+          });
+        }
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        // 错误消息可能包含服务器返回的信息，需要脱敏
+        return sanitizeToolResult({
+          content: [{ type: "text", text: `错误: ${message}` }],
+          isError: true,
+        });
+      }
+    }
+  );
 }

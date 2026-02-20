@@ -230,19 +230,19 @@ async function addServer(name?: string, options?: {
     const proxyPort = options?.proxyPort
       ? parseInt(options.proxyPort)
       : parseInt(await input({
-          message: "代理端口:",
-          default: "10809",
-        })) || 10809;
+        message: "代理端口:",
+        default: "10809",
+      })) || 10809;
 
     const proxyType = options?.proxyType
       ? (parseInt(options.proxyType) as 4 | 5)
       : await select({
-          message: "代理类型:",
-          choices: [
-            { name: "SOCKS5", value: 5 as const },
-            { name: "SOCKS4", value: 4 as const },
-          ],
-        });
+        message: "代理类型:",
+        choices: [
+          { name: "SOCKS5", value: 5 as const },
+          { name: "SOCKS4", value: 4 as const },
+        ],
+      });
 
     server.proxy = {
       host: proxyHost,
@@ -712,7 +712,7 @@ export function createCLI(): Command {
     .option("-H, --host <host>", "主机地址")
     .option("-P, --port <port>", "端口")
     .option("-u, --user <user>", "用户名")
-    .option("-p, --password <password>", "密码")
+    .option("-p, --password <password>", "密码（⚠️ 会出现在进程列表中，建议使用交互式输入）")
     .option("-k, --key <path>", "私钥路径")
     .option("--passphrase <passphrase>", "私钥密码")
     .option("--proxy-host <host>", "代理地址")
