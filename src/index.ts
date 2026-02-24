@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSHManager } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
+import { NotesManager } from "./notes-manager.js";
 import { registerTools } from "./tools.js";
 import { runCLI } from "./cli.js";
 
@@ -36,8 +37,9 @@ async function startServer(): Promise<void> {
 
   const sshManager = new SSHManager();
   const configManager = new ConfigManager();
+  const notesManager = new NotesManager();
 
-  registerTools(server, sshManager, configManager);
+  registerTools(server, sshManager, configManager, notesManager);
 
   const transport = new StdioServerTransport();
 
