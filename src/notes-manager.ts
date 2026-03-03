@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
-const NOTES_DIR = join(homedir(), ".mori", "notes");
+const NOTES_DIR = join(homedir(), ".mori", "ssh", "notes");
 
 /**
  * 服务器备注管理器

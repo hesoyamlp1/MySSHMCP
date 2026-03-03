@@ -5,6 +5,7 @@ import { select, input, password, confirm } from "@inquirer/prompts";
 import { ConfigManager, ConfigScope } from "./config.js";
 import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
 import { ServerConfig, ProxyConfig } from "./types.js";
+import { loadSanitizerConfig, saveSanitizerConfig, getSanitizerConfigPath, IpMode } from "./sanitizer-config.js";
 
 /**
  * 获取 ConfigManager 实例
@@ -115,8 +116,8 @@ async function addServer(name?: string, options?: {
     scope = await select({
       message: "保存到哪个级别?",
       choices: [
-        { name: "📁 项目级别 (当前目录/.mori/)", value: "local" as ConfigScope },
-        { name: "🌐 用户级别 (~/.mori/)", value: "global" as ConfigScope },
+        { name: "📁 项目级别 (当前目录/.mori/ssh/)", value: "local" as ConfigScope },
+        { name: "🌐 用户级别 (~/.mori/ssh/)", value: "global" as ConfigScope },
       ],
     });
   }
@@ -434,6 +435,7 @@ async function interactiveConfig(): Promise<void> {
         { name: "🔌 测试连接", value: "test" },
         { name: "🔄 切换配置级别", value: "switch" },
         { name: "📁 显示配置文件路径", value: "path" },
+        { name: "🛡️  IP 屏蔽设置", value: "sanitizer" },
         { name: "🚪 退出", value: "exit" },
       ],
     });
@@ -562,6 +564,10 @@ async function interactiveConfig(): Promise<void> {
         console.log(`文件是否存在: ${configManager.configExists() ? "是" : "否"}`);
         break;
 
+      case "sanitizer":
+        await configureSanitizer();
+        break;
+
       case "exit":
         console.log("再见!");
         return;
@@ -683,6 +689,104 @@ async function addServerToManager(configManager: ConfigManager, existingName?: s
 
   configManager.addServer(server);
   console.log(`\n✓ 服务器 '${serverName}' 已保存`);
+}
+
+/**
+ * IP 屏蔽设置
+ */
+async function configureSanitizer(): Promise<void> {
+  const modeLabels: Record<IpMode, string> = {
+    "all": "🚫 全量屏蔽所有 IP",
+    "ssh-only": "🔒 仅屏蔽 SSH 配置的地址",
+    "none": "✅ 完全不屏蔽",
+  };
+
+  while (true) {
+    const config = loadSanitizerConfig();
+
+    console.log(`\n当前设置:`);
+    console.log(`  模式: ${modeLabels[config.ipMode]}`);
+    console.log(`  白名单: ${config.whitelist.length === 0 ? "(无)" : config.whitelist.join(", ")}`);
+    console.log(`  配置文件: ${getSanitizerConfigPath()}\n`);
+
+    const action = await select({
+      message: "IP 屏蔽设置:",
+      choices: [
+        { name: "🔄 切换屏蔽模式", value: "mode" },
+        { name: "➕ 添加白名单 IP", value: "add-whitelist" },
+        { name: "➖ 删除白名单 IP", value: "remove-whitelist" },
+        { name: "⬅️  返回", value: "back" },
+      ],
+    });
+
+    if (action === "back") return;
+
+    switch (action) {
+      case "mode": {
+        const newMode = await select({
+          message: "选择 IP 屏蔽模式:",
+          choices: [
+            {
+              name: "🚫 全量屏蔽 — 所有 IP/IPv6/MAC 地址都会被替换为 [IP]/[IPv6]/[MAC]",
+              value: "all" as IpMode,
+            },
+            {
+              name: "🔒 仅屏蔽 SSH 配置 — 只屏蔽 ssh-servers.json 中配置的服务器和代理 IP",
+              value: "ssh-only" as IpMode,
+            },
+            {
+              name: "✅ 完全不屏蔽 — 不对任何 IP 地址进行脱敏",
+              value: "none" as IpMode,
+            },
+          ],
+        });
+
+        config.ipMode = newMode;
+        saveSanitizerConfig(config);
+        console.log(`\n✓ 屏蔽模式已切换为: ${modeLabels[newMode]}`);
+        console.log("  ℹ️  重启 MCP 服务后生效");
+        break;
+      }
+
+      case "add-whitelist": {
+        const ip = await input({
+          message: "输入要添加到白名单的 IP 地址:",
+          validate: (v) => v.trim() ? true : "IP 不能为空",
+        });
+
+        if (!config.whitelist.includes(ip.trim())) {
+          config.whitelist.push(ip.trim());
+          saveSanitizerConfig(config);
+          console.log(`\n✓ 已添加白名单: ${ip.trim()}`);
+          console.log("  ℹ️  重启 MCP 服务后生效");
+        } else {
+          console.log(`\n⚠️  ${ip.trim()} 已在白名单中`);
+        }
+        break;
+      }
+
+      case "remove-whitelist": {
+        if (config.whitelist.length === 0) {
+          console.log("\n白名单为空");
+          break;
+        }
+
+        const toRemove = await select({
+          message: "选择要删除的白名单 IP:",
+          choices: config.whitelist.map((ip) => ({
+            name: ip,
+            value: ip,
+          })),
+        });
+
+        config.whitelist = config.whitelist.filter((ip) => ip !== toRemove);
+        saveSanitizerConfig(config);
+        console.log(`\n✓ 已删除白名单: ${toRemove}`);
+        console.log("  ℹ️  重启 MCP 服务后生效");
+        break;
+      }
+    }
+  }
 }
 
 /**

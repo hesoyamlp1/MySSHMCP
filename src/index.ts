@@ -5,6 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SSHManager } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
 import { NotesManager } from "./notes-manager.js";
+import { loadSanitizerConfig } from "./sanitizer-config.js";
+import { initSanitizer } from "./sanitizer.js";
 import { registerTools } from "./tools.js";
 import { runCLI } from "./cli.js";
 
@@ -38,6 +40,10 @@ async function startServer(): Promise<void> {
   const sshManager = new SSHManager();
   const configManager = new ConfigManager();
   const notesManager = new NotesManager();
+
+  // 加载 sanitizer 配置并初始化
+  const sanitizerConfig = loadSanitizerConfig();
+  initSanitizer(sanitizerConfig.ipMode, sanitizerConfig.whitelist);
 
   registerTools(server, sshManager, configManager, notesManager);
 

@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { sanitize } from "./sanitizer.js";
 
-const OUTPUT_DIR = join(homedir(), ".mori", "output");
+const OUTPUT_DIR = join(homedir(), ".mori", "ssh", "output");
 const THRESHOLD_CHARS = 8000;
 const TAIL_CHARS = 2000;
 
