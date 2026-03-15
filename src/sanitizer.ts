@@ -3,6 +3,8 @@
  * 用于在 MCP 返回中隐藏 IP、密码等敏感信息
  */
 
+import { IpMode } from "./sanitizer-config.js";
+
 export interface SensitivePattern {
   pattern: RegExp;
   replacement: string;
@@ -10,7 +12,7 @@ export interface SensitivePattern {
 }
 
 // 不需要脱敏的本地回环 / 保留地址
-const WHITELISTED_IPS = new Set([
+const LOOPBACK_IPS = new Set([
   "127.0.0.1",
   "0.0.0.0",
   "255.255.255.255",
@@ -22,13 +24,24 @@ export class Sanitizer {
   private sensitiveValues: Set<string> = new Set();
   private patterns: SensitivePattern[] = [];
   private whitelist: Set<string>;
+  private ipMode: IpMode;
 
-  constructor() {
-    this.whitelist = new Set(WHITELISTED_IPS);
+  constructor(ipMode: IpMode = "all", whitelist: string[] = []) {
+    this.ipMode = ipMode;
+    this.whitelist = new Set([...LOOPBACK_IPS, ...whitelist]);
 
-    // 内置通用模式 ——
-    // 注意：更具体的模式排在前面，避免被通用模式提前匹配
+    // 仅在 "all" 模式下注册通用 IP 匹配正则
+    if (ipMode === "all") {
+      this.registerIpPatterns();
+    }
+    // "ssh-only" 模式：不注册通用正则，由 addSensitiveValues 精确匹配配置的地址
+    // "none" 模式：不注册任何 IP 相关 pattern
+  }
 
+  /**
+   * 注册 IP/IPv6/MAC 匹配正则（仅 all 模式使用）
+   */
+  private registerIpPatterns(): void {
     // IPv4-mapped IPv6: ::ffff:192.168.1.1 (必须在 IPv4 之前)
     this.addPattern({
       pattern: /::ffff:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/gi,
@@ -36,14 +49,14 @@ export class Sanitizer {
       description: "IPv4-mapped IPv6 地址",
     });
 
-    // MAC 地址: aa:bb:cc:dd:ee:ff 或 AA-BB-CC-DD-EE-FF (必须在 IPv6 之前，避免误匹配)
+    // MAC 地址: aa:bb:cc:dd:ee:ff 或 AA-BB-CC-DD-EE-FF (必须在 IPv6 之前)
     this.addPattern({
       pattern: /\b([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b/g,
       replacement: "[MAC]",
       description: "MAC 地址",
     });
 
-    // IPv6 完整形式: 2001:0db8:85a3:0000:0000:8a2e:0370:7334
+    // IPv6 完整形式
     this.addPattern({
       pattern: /\b([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b/g,
       replacement: "[IPv6]",
@@ -69,7 +82,7 @@ export class Sanitizer {
       description: "IPv6 缩写 (::后缀)",
     });
 
-    // IPv4 地址（放在最后，避免抢先匹配 IPv4-mapped IPv6 中的 IP 部分）
+    // IPv4 地址（放在最后）
     this.addPattern({
       pattern: /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g,
       replacement: "[IP]",
@@ -115,6 +128,13 @@ export class Sanitizer {
    */
   addWhitelist(value: string): void {
     this.whitelist.add(value);
+  }
+
+  /**
+   * 获取当前 IP 模式
+   */
+  getIpMode(): IpMode {
+    return this.ipMode;
   }
 
   /**
@@ -183,6 +203,14 @@ export class Sanitizer {
 
 // 全局单例
 let globalSanitizer: Sanitizer | null = null;
+
+/**
+ * 初始化全局 Sanitizer（启动时调用一次）
+ */
+export function initSanitizer(ipMode: IpMode = "all", whitelist: string[] = []): Sanitizer {
+  globalSanitizer = new Sanitizer(ipMode, whitelist);
+  return globalSanitizer;
+}
 
 export function getSanitizer(): Sanitizer {
   if (!globalSanitizer) {

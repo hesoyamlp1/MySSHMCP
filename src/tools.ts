@@ -3,6 +3,7 @@ import { CallToolResult, TextContent } from "@modelcontextprotocol/sdk/types.js"
 import { z } from "zod";
 import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
+import { NotesManager } from "./notes-manager.js";
 import { sanitize } from "./sanitizer.js";
 import { ShellResult } from "./types.js";
 import { saveIfLarge } from "./output-store.js";
@@ -63,7 +64,8 @@ function truncateIfLarge(resultObj: Record<string, unknown>): string {
 export function registerTools(
   server: McpServer,
   sshManager: SSHManager,
-  configManager: ConfigManager
+  configManager: ConfigManager,
+  notesManager: NotesManager
 ): void {
   server.registerTool(
     "ssh",
@@ -71,10 +73,11 @@ export function registerTools(
       description: `SSH 远程服务器连接管理和 PTY Shell 交互。
 
 ## 连接管理 (action)
-- list: 列出所有可用服务器
-- connect: 连接服务器（需提供 server 参数）
+- list: 列出所有可用服务器（附带备注摘要）
+- connect: 连接服务器（需提供 server 参数，自动附带完整备注）
 - disconnect: 断开当前连接
 - status: 查看连接状态和 shell 缓冲区行数
+- notes: 读写服务器备注（配合 content 参数写入）
 
 ## 命令执行 (command)
 直接提供 command 参数执行命令，支持交互式程序。
@@ -86,8 +89,12 @@ export function registerTools(
 ## 智能输出检测
 - 快速命令（<2秒）：检测到提示符后返回
 - 慢速命令（2-5秒）：标记 slow=true
-- 超时命令（>5秒）：截断到最近 200 行，标记 truncated=true
+- 超时命令（>maxTimeout）：截断到最近 200 行，标记 truncated=true
 - 持续输出：输出稳定后返回，标记 waiting=true
+
+## timeout 参数
+对于耗时较长的命令（如 pip install、apt upgrade、docker build 等），可以指定 timeout 参数（单位：秒，默认 5，最大 300）。
+服务端会在 timeout 时间内持续等待命令完成，避免反复轮询浪费上下文。
 
 ## 返回字段
 - output: 命令输出
@@ -103,6 +110,7 @@ export function registerTools(
 ssh({ action: "list" })
 ssh({ action: "connect", server: "my-server" })
 ssh({ command: "ls -la" })
+ssh({ command: "pip install tensorflow", timeout: 120 })  # 等待最多 120 秒
 ssh({ action: "status" })
 ssh({ action: "disconnect" })
 
@@ -121,17 +129,23 @@ ssh({ command: "tail -f /var/log/syslog" })
 ssh({ read: true })                     # 查看输出
 ssh({ signal: "SIGINT" })               # Ctrl+C 停止
 
+### 服务器备注
+ssh({ action: "notes" })                         # 读取当前服务器的备注
+ssh({ action: "notes", content: "1panel 管理, openresty, *.example.com SSL" })  # 写入备注
+
 ## 安全说明
 - 输出中的 IP 地址会被替换为 [IP]，密码等敏感信息会被替换为 [REDACTED]
 - 这是系统自动脱敏处理，不影响实际命令执行
 - 如输出过长（超过 8000 字符），完整内容会保存到本地文件，仅返回尾部摘要`,
       inputSchema: {
         action: z
-          .enum(["list", "connect", "disconnect", "status"])
+          .enum(["list", "connect", "disconnect", "status", "notes"])
           .optional()
           .describe("连接管理操作"),
         server: z.string().optional().describe("服务器名称（connect 时必填）"),
+        content: z.string().optional().describe("备注内容（notes 写入时使用）"),
         command: z.string().optional().describe("要执行的命令"),
+        timeout: z.number().optional().describe("命令最大等待时间（秒），默认 5，最大 300。对于 pip install、apt upgrade 等长时间命令建议设置较大值"),
         read: z.boolean().optional().describe("读取缓冲区"),
         lines: z.number().optional().describe("读取行数，默认 20，-1 返回全部"),
         offset: z.number().optional().describe("读取起始偏移，默认 0"),
@@ -142,7 +156,7 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
           .describe("发送信号：SIGINT(Ctrl+C)/SIGTSTP(Ctrl+Z)/SIGQUIT"),
       },
     },
-    async ({ action, server: serverName, command, read, lines, offset, clear, signal }): Promise<CallToolResult> => {
+    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal }): Promise<CallToolResult> => {
       try {
         // 1. 发送信号
         if (signal) {
@@ -201,7 +215,11 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
           }
 
           const shellManager = sshManager.getShellManager();
-          const result = sanitizeResult(await shellManager.send(command));
+          // 将 timeout 秒转为毫秒，限制范围 5-300 秒
+          const timeoutMs = timeout
+            ? Math.min(Math.max(timeout, 5), 300) * 1000
+            : undefined;
+          const result = sanitizeResult(await shellManager.send(command, timeoutMs ? { maxTimeout: timeoutMs } : undefined));
 
           return sanitizeToolResult({
             content: [{
@@ -230,11 +248,13 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
                 name: LOCAL_SERVER.name,
                 connected: status.serverName === LOCAL_SERVER.name,
                 type: "built-in",
+                notes: notesManager.readSummary(LOCAL_SERVER.name),
               },
               ...servers.map((s) => ({
                 name: s.name,
                 connected: status.serverName === s.name,
                 type: "configured",
+                notes: notesManager.readSummary(s.name),
               })),
             ];
 
@@ -254,10 +274,14 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
             // 检查是否是本地连接
             if (serverName === "local") {
               await sshManager.connect(LOCAL_SERVER);
+              const notes = notesManager.read("local");
               return sanitizeToolResult({
                 content: [{
                   type: "text",
-                  text: "成功连接到本地 Shell",
+                  text: JSON.stringify({
+                    message: "成功连接到本地 Shell",
+                    notes: notes || undefined,
+                  }, null, 2),
                 }],
               });
             }
@@ -276,10 +300,14 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
 
             await sshManager.connect(serverConfig);
 
+            const notes = notesManager.read(serverName);
             return sanitizeToolResult({
               content: [{
                 type: "text",
-                text: `成功连接到 '${serverName}'，PTY Shell 已就绪`,
+                text: JSON.stringify({
+                  message: `成功连接到 '${serverName}'，PTY Shell 已就绪`,
+                  notes: notes || undefined,
+                }, null, 2),
               }],
             });
           }
@@ -321,6 +349,44 @@ ssh({ signal: "SIGINT" })               # Ctrl+C 停止
                 content: [{ type: "text", text: JSON.stringify({ connected: false }, null, 2) }],
               });
             }
+          }
+
+          case "notes": {
+            // 确定目标服务器名
+            const targetServer = serverName || sshManager.getStatus().serverName;
+            if (!targetServer) {
+              return sanitizeToolResult({
+                content: [{ type: "text", text: "请指定服务器名称（server 参数）或先连接服务器" }],
+                isError: true,
+              });
+            }
+
+            // 写入模式
+            if (content !== undefined) {
+              const path = notesManager.write(targetServer, content);
+              return sanitizeToolResult({
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    message: `备注已保存`,
+                    server: targetServer,
+                    path,
+                  }, null, 2),
+                }],
+              });
+            }
+
+            // 读取模式
+            const notes = notesManager.read(targetServer);
+            return sanitizeToolResult({
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  server: targetServer,
+                  notes: notes || "（暂无备注）",
+                }, null, 2),
+              }],
+            });
           }
         }
       } catch (error: unknown) {

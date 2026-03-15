@@ -74,8 +74,8 @@ mcp-ssh-pty config
 
 | Level | Path | Priority |
 |-------|------|----------|
-| Project | `./.mori/ssh-servers.json` | High |
-| User | `~/.mori/ssh-servers.json` | Low |
+| Project | `./.mori/ssh/ssh-servers.json` | High |
+| User | `~/.mori/ssh/ssh-servers.json` | Low |
 | Custom | `SSH_MCP_CONFIG_PATH` env | Highest |
 
 ### Config format

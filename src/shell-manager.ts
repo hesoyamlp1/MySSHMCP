@@ -381,8 +381,16 @@ export class ShellManager {
           return;
         }
 
-        // 策略 D: 输出稳定但无提示符（500ms 无新输出）
-        if (timeSinceLastOutput > 500 && stableCount >= 5 && elapsed > 1000) {
+        // 策略 D: 输出稳定但无提示符
+        // 当 maxTimeout 较大时（长时间命令），允许更长的静默期，避免误判
+        const silenceThreshold = config.maxTimeout > DEFAULT_CONFIG.maxTimeout
+          ? Math.min(config.maxTimeout * 0.2, 10000)  // 最多 10 秒静默
+          : 500;
+        const stableThreshold = config.maxTimeout > DEFAULT_CONFIG.maxTimeout ? 10 : 5;
+        const minElapsed = config.maxTimeout > DEFAULT_CONFIG.maxTimeout
+          ? Math.min(config.maxTimeout * 0.5, 30000)  // 至少等一半时间
+          : 1000;
+        if (timeSinceLastOutput > silenceThreshold && stableCount >= stableThreshold && elapsed > minElapsed) {
           clearInterval(check);
           resolve(this.buildResult(
             currentOutput,
