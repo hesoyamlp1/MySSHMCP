@@ -1,6 +1,5 @@
 {
   "name": "@mori-mori/mcp-ssh-pty",
-  "version": "1.6.0",
   "version": "1.8.0",
   "description": "MCP Server for SSH remote command execution with PTY shell support",
   "type": "module",
