@@ -196,14 +196,14 @@ export class SSHManager {
    */
   private registerSensitiveInfo(config: ServerConfig): void {
     const sanitizer = getSanitizer();
-    sanitizer.addSensitiveValues([
-      config.host,
-      config.password,
-      config.passphrase,
-      config.username,
-      config.privateKeyPath,
-      config.proxy?.host,
-      config.proxy?.password,
+    sanitizer.addCategorizedSensitiveValues([
+      { value: config.host, category: "host" },
+      { value: config.password, category: "password" },
+      { value: config.passphrase, category: "password" },
+      { value: config.username, category: "username" },
+      { value: config.privateKeyPath, category: "key" },
+      { value: config.proxy?.host, category: "host" },
+      { value: config.proxy?.password, category: "password" },
     ]);
   }
 

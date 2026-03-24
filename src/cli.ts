@@ -5,7 +5,7 @@ import { select, input, password, confirm } from "@inquirer/prompts";
 import { ConfigManager, ConfigScope } from "./config.js";
 import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
 import { ServerConfig, ProxyConfig } from "./types.js";
-import { loadSanitizerConfig, saveSanitizerConfig, getSanitizerConfigPath, IpMode } from "./sanitizer-config.js";
+import { loadSanitizerConfig, saveSanitizerConfig, getSanitizerConfigPath, IpMode, PasswordMode } from "./sanitizer-config.js";
 
 /**
  * 获取 ConfigManager 实例
@@ -435,7 +435,7 @@ async function interactiveConfig(): Promise<void> {
         { name: "🔌 测试连接", value: "test" },
         { name: "🔄 切换配置级别", value: "switch" },
         { name: "📁 显示配置文件路径", value: "path" },
-        { name: "🛡️  IP 屏蔽设置", value: "sanitizer" },
+        { name: "🛡️  脱敏设置", value: "sanitizer" },
         { name: "🚪 退出", value: "exit" },
       ],
     });
@@ -692,29 +692,37 @@ async function addServerToManager(configManager: ConfigManager, existingName?: s
 }
 
 /**
- * IP 屏蔽设置
+ * 脱敏设置
  */
 async function configureSanitizer(): Promise<void> {
-  const modeLabels: Record<IpMode, string> = {
-    "all": "🚫 全量屏蔽所有 IP",
-    "ssh-only": "🔒 仅屏蔽 SSH 配置的地址",
-    "none": "✅ 完全不屏蔽",
-  };
-
   while (true) {
     const config = loadSanitizerConfig();
 
-    console.log(`\n当前设置:`);
-    console.log(`  模式: ${modeLabels[config.ipMode]}`);
-    console.log(`  白名单: ${config.whitelist.length === 0 ? "(无)" : config.whitelist.join(", ")}`);
-    console.log(`  配置文件: ${getSanitizerConfigPath()}\n`);
+    const ipModeLabels: Record<IpMode, string> = {
+      "all": "🚫 全量屏蔽所有 IP",
+      "ssh-only": "🔒 仅屏蔽 SSH 配置的地址",
+      "none": "✅ 完全不屏蔽",
+    };
+
+    const passwordModeLabels: Record<PasswordMode, string> = {
+      "all": "🚫 全部脱敏 (密码/用户名/主机/密钥路径)",
+      "password-only": "🔒 仅脱敏密码和密钥口令",
+      "none": "✅ 完全不脱敏",
+    };
+
+    console.log(`\n当前脱敏设置:`);
+    console.log(`  IP 模式:   ${ipModeLabels[config.ipMode]}`);
+    console.log(`  密码模式:  ${passwordModeLabels[config.passwordMode]}`);
+    console.log(`  IP 白名单: ${config.whitelist.length === 0 ? "(无)" : config.whitelist.join(", ")}`);
+    console.log(`  配置文件:  ${getSanitizerConfigPath()}\n`);
 
     const action = await select({
-      message: "IP 屏蔽设置:",
+      message: "脱敏设置:",
       choices: [
-        { name: "🔄 切换屏蔽模式", value: "mode" },
-        { name: "➕ 添加白名单 IP", value: "add-whitelist" },
-        { name: "➖ 删除白名单 IP", value: "remove-whitelist" },
+        { name: "🌐 IP 屏蔽设置", value: "ip" },
+        { name: "🔑 密码脱敏设置", value: "password" },
+        { name: "➕ 添加 IP 白名单", value: "add-whitelist" },
+        { name: "➖ 删除 IP 白名单", value: "remove-whitelist" },
         { name: "⬅️  返回", value: "back" },
       ],
     });
@@ -722,7 +730,7 @@ async function configureSanitizer(): Promise<void> {
     if (action === "back") return;
 
     switch (action) {
-      case "mode": {
+      case "ip": {
         const newMode = await select({
           message: "选择 IP 屏蔽模式:",
           choices: [
@@ -743,7 +751,33 @@ async function configureSanitizer(): Promise<void> {
 
         config.ipMode = newMode;
         saveSanitizerConfig(config);
-        console.log(`\n✓ 屏蔽模式已切换为: ${modeLabels[newMode]}`);
+        console.log(`\n✓ IP 屏蔽模式已切换为: ${ipModeLabels[newMode]}`);
+        console.log("  ℹ️  重启 MCP 服务后生效");
+        break;
+      }
+
+      case "password": {
+        const newMode = await select({
+          message: "选择密码脱敏模式:",
+          choices: [
+            {
+              name: "🚫 全部脱敏 — 密码、用户名、主机地址、密钥路径等都会被替换为 [REDACTED]",
+              value: "all" as PasswordMode,
+            },
+            {
+              name: "🔒 仅脱敏密码 — 只脱敏密码和密钥口令，用户名/主机等不脱敏",
+              value: "password-only" as PasswordMode,
+            },
+            {
+              name: "✅ 完全不脱敏 — 不对任何密码/敏感信息进行脱敏",
+              value: "none" as PasswordMode,
+            },
+          ],
+        });
+
+        config.passwordMode = newMode;
+        saveSanitizerConfig(config);
+        console.log(`\n✓ 密码脱敏模式已切换为: ${passwordModeLabels[newMode]}`);
         console.log("  ℹ️  重启 MCP 服务后生效");
         break;
       }

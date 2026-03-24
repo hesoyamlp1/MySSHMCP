@@ -5,14 +5,17 @@ import { join, dirname } from "path";
 const CONFIG_PATH = join(homedir(), ".mori", "ssh", "sanitizer.json");
 
 export type IpMode = "all" | "ssh-only" | "none";
+export type PasswordMode = "all" | "password-only" | "none";
 
 export interface SanitizerConfig {
     ipMode: IpMode;
+    passwordMode: PasswordMode;
     whitelist: string[];
 }
 
 const DEFAULT_CONFIG: SanitizerConfig = {
     ipMode: "all",
+    passwordMode: "all",
     whitelist: [],
 };
 
@@ -28,6 +31,7 @@ export function loadSanitizerConfig(): SanitizerConfig {
         const parsed = JSON.parse(content);
         return {
             ipMode: parsed.ipMode || DEFAULT_CONFIG.ipMode,
+            passwordMode: parsed.passwordMode || DEFAULT_CONFIG.passwordMode,
             whitelist: Array.isArray(parsed.whitelist) ? parsed.whitelist : [],
         };
     } catch {

@@ -3,7 +3,7 @@
  * 用于在 MCP 返回中隐藏 IP、密码等敏感信息
  */
 
-import { IpMode } from "./sanitizer-config.js";
+import { IpMode, PasswordMode } from "./sanitizer-config.js";
 
 export interface SensitivePattern {
   pattern: RegExp;
@@ -20,14 +20,18 @@ const LOOPBACK_IPS = new Set([
   "::",
 ]);
 
+export type SensitiveCategory = "password" | "host" | "username" | "key" | "other";
+
 export class Sanitizer {
   private sensitiveValues: Set<string> = new Set();
   private patterns: SensitivePattern[] = [];
   private whitelist: Set<string>;
   private ipMode: IpMode;
+  private passwordMode: PasswordMode;
 
-  constructor(ipMode: IpMode = "all", whitelist: string[] = []) {
+  constructor(ipMode: IpMode = "all", whitelist: string[] = [], passwordMode: PasswordMode = "all") {
     this.ipMode = ipMode;
+    this.passwordMode = passwordMode;
     this.whitelist = new Set([...LOOPBACK_IPS, ...whitelist]);
 
     // 仅在 "all" 模式下注册通用 IP 匹配正则
@@ -98,21 +102,47 @@ export class Sanitizer {
   }
 
   /**
+   * 检查某个类别的敏感值是否应该被脱敏
+   */
+  private shouldSanitizeCategory(category: SensitiveCategory): boolean {
+    switch (this.passwordMode) {
+      case "all":
+        return true;
+      case "password-only":
+        return category === "password" || category === "key";
+      case "none":
+        return false;
+      default:
+        return true;
+    }
+  }
+
+  /**
    * 注册敏感值（如密码、私钥路径等）
    * 这些值会被精确匹配并替换
+   * @param category 敏感值类别，用于根据 passwordMode 判断是否脱敏
    */
-  addSensitiveValue(value: string, minLength: number = 3): void {
-    if (value && value.length >= minLength) {
+  addSensitiveValue(value: string, category: SensitiveCategory = "other", minLength: number = 3): void {
+    if (value && value.length >= minLength && this.shouldSanitizeCategory(category)) {
       this.sensitiveValues.add(value);
     }
   }
 
   /**
-   * 批量注册敏感值
+   * 批量注册敏感值（带类别）
    */
-  addSensitiveValues(values: (string | undefined)[]): void {
+  addCategorizedSensitiveValues(values: { value: string | undefined; category: SensitiveCategory }[]): void {
+    values.forEach(({ value, category }) => {
+      if (value) this.addSensitiveValue(value, category);
+    });
+  }
+
+  /**
+   * 批量注册敏感值（旧接口兼容，默认 category 为 "other"）
+   */
+  addSensitiveValues(values: (string | undefined)[], category: SensitiveCategory = "other"): void {
     values.forEach((v) => {
-      if (v) this.addSensitiveValue(v);
+      if (v) this.addSensitiveValue(v, category);
     });
   }
 
@@ -135,6 +165,13 @@ export class Sanitizer {
    */
   getIpMode(): IpMode {
     return this.ipMode;
+  }
+
+  /**
+   * 获取当前密码脱敏模式
+   */
+  getPasswordMode(): PasswordMode {
+    return this.passwordMode;
   }
 
   /**
@@ -207,8 +244,8 @@ let globalSanitizer: Sanitizer | null = null;
 /**
  * 初始化全局 Sanitizer（启动时调用一次）
  */
-export function initSanitizer(ipMode: IpMode = "all", whitelist: string[] = []): Sanitizer {
-  globalSanitizer = new Sanitizer(ipMode, whitelist);
+export function initSanitizer(ipMode: IpMode = "all", whitelist: string[] = [], passwordMode: PasswordMode = "all"): Sanitizer {
+  globalSanitizer = new Sanitizer(ipMode, whitelist, passwordMode);
   return globalSanitizer;
 }
 

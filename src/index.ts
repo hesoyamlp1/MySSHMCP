@@ -43,7 +43,7 @@ async function startServer(): Promise<void> {
 
   // 加载 sanitizer 配置并初始化
   const sanitizerConfig = loadSanitizerConfig();
-  initSanitizer(sanitizerConfig.ipMode, sanitizerConfig.whitelist);
+  initSanitizer(sanitizerConfig.ipMode, sanitizerConfig.whitelist, sanitizerConfig.passwordMode);
 
   registerTools(server, sshManager, configManager, notesManager);
 
