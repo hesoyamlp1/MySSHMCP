@@ -3,7 +3,7 @@ import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { SocksClient } from "socks";
-import { ServerConfig, ConnectionStatus, ProxyConfig } from "./types.js";
+import { ServerConfig, ConnectionStatus, ProxyConfig, ProxyJumpConfig } from "./types.js";
 import { ShellManager } from "./shell-manager.js";
 import { SFTPManager } from "./sftp-manager.js";
 import { getSanitizer } from "./sanitizer.js";
@@ -18,6 +18,7 @@ export const LOCAL_SERVER: ServerConfig = {
 
 export class SSHManager {
   private client: Client | null = null;
+  private jumpClient: Client | null = null;
   private currentServer: ServerConfig | null = null;
   private isConnected: boolean = false;
   private shellManager: ShellManager;
@@ -75,6 +76,11 @@ export class SSHManager {
    * SSH 远程连接
    */
   private async connectSSH(config: ServerConfig): Promise<void> {
+    // ProxyJump: 先连跳板机，再通过 forwardOut 连目标
+    if (config.proxyJump) {
+      return this.connectViaJump(config);
+    }
+
     // 如果配置了代理，先建立代理连接
     let proxySocket: ReturnType<typeof SocksClient.createConnection> extends Promise<infer T> ? T : never;
     if (config.proxy) {
@@ -151,6 +157,132 @@ export class SSHManager {
   }
 
   /**
+   * 通过 ProxyJump 跳板机连接
+   */
+  private async connectViaJump(config: ServerConfig): Promise<void> {
+    const jump = config.proxyJump!;
+    const jumpPort = jump.port || 22;
+    const destPort = config.port || 22;
+
+    // 第一步：连接跳板机
+    this.jumpClient = new Client();
+
+    const jumpStream = await new Promise<NodeJS.ReadWriteStream>((resolve, reject) => {
+      this.jumpClient!.on("ready", () => {
+        // 第二步：通过跳板机建立到目标的隧道
+        this.jumpClient!.forwardOut(
+          "127.0.0.1", 0,
+          config.host, destPort,
+          (err, stream) => {
+            if (err) {
+              this.jumpClient!.end();
+              reject(new Error(`跳板机隧道创建失败: ${err.message}`));
+            } else {
+              resolve(stream);
+            }
+          }
+        );
+      });
+
+      this.jumpClient!.on("error", (err) => {
+        reject(new Error(`跳板机连接失败: ${err.message}`));
+      });
+
+      const jumpConfig: Record<string, unknown> = {
+        host: jump.host,
+        port: jumpPort,
+        username: jump.username,
+        keepaliveInterval: 10000,
+        keepaliveCountMax: 3,
+      };
+
+      if (jump.privateKeyPath) {
+        try {
+          jumpConfig.privateKey = readFileSync(this.expandPath(jump.privateKeyPath));
+          if (jump.passphrase) {
+            jumpConfig.passphrase = jump.passphrase;
+          }
+        } catch (error) {
+          reject(new Error(`无法读取跳板机私钥文件: ${jump.privateKeyPath}`));
+          return;
+        }
+      } else if (jump.password) {
+        jumpConfig.password = jump.password;
+      } else {
+        reject(new Error("跳板机必须提供 password 或 privateKeyPath"));
+        return;
+      }
+
+      this.jumpClient!.connect(jumpConfig);
+    });
+
+    // 第三步：通过隧道连接目标服务器
+    return new Promise((resolve, reject) => {
+      this.client = new Client();
+
+      this.client.on("ready", async () => {
+        this.isConnected = true;
+        this.isLocalConnection = false;
+        this.currentServer = config;
+
+        this.registerSensitiveInfo(config);
+        // 也注册跳板机的敏感信息
+        const sanitizer = getSanitizer();
+        sanitizer.addSensitiveValues([
+          jump.host,
+          jump.password,
+          jump.passphrase,
+          jump.username,
+          jump.privateKeyPath,
+        ]);
+
+        try {
+          await this.shellManager.open(this.client!);
+          resolve();
+        } catch (err) {
+          this.cleanup();
+          reject(err);
+        }
+      });
+
+      this.client.on("error", (err) => {
+        this.cleanup();
+        reject(err);
+      });
+
+      this.client.on("close", () => {
+        this.cleanup();
+      });
+
+      const connectConfig: Record<string, unknown> = {
+        sock: jumpStream,
+        username: config.username,
+        keepaliveInterval: 10000,
+        keepaliveCountMax: 3,
+      };
+
+      if (config.privateKeyPath) {
+        try {
+          connectConfig.privateKey = readFileSync(this.expandPath(config.privateKeyPath));
+          if (config.passphrase) {
+            connectConfig.passphrase = config.passphrase;
+          }
+        } catch (error) {
+          reject(new Error(`无法读取私钥文件: ${config.privateKeyPath}`));
+          return;
+        }
+      } else if (config.password) {
+        connectConfig.password = config.password;
+      } else {
+        reject(new Error("必须提供 password 或 privateKeyPath"));
+        return;
+      }
+
+      this.client.connect(connectConfig);
+    });
+  }
+
+  /**
    * 通过 SOCKS 代理创建连接
    */
   private async createProxyConnection(proxy: ProxyConfig, destHost: string, destPort: number) {
@@ -178,6 +310,9 @@ export class SSHManager {
     if (this.client && this.isConnected && !this.isLocalConnection) {
       this.client.end();
     }
+    if (this.jumpClient) {
+      this.jumpClient.end();
+    }
     this.cleanup();
   }
 
@@ -187,6 +322,7 @@ export class SSHManager {
     this.isLocalConnection = false;
     this.currentServer = null;
     this.client = null;
+    this.jumpClient = null;
     // 清除敏感信息
     getSanitizer().clearSensitiveValues();
   }

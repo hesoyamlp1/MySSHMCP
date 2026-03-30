@@ -6,6 +6,15 @@ export interface ProxyConfig {
   password?: string;
 }
 
+export interface ProxyJumpConfig {
+  host: string;
+  port?: number;
+  username: string;
+  password?: string;
+  privateKeyPath?: string;
+  passphrase?: string;
+}
+
 export interface ServerConfig {
   name: string;
   host: string;
@@ -15,6 +24,7 @@ export interface ServerConfig {
   privateKeyPath?: string;
   passphrase?: string;
   proxy?: ProxyConfig;
+  proxyJump?: ProxyJumpConfig;
 }
 
 export interface ServersConfig {

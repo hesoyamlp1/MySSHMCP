@@ -4,7 +4,7 @@ import { Command } from "commander";
 import { select, input, password, confirm } from "@inquirer/prompts";
 import { ConfigManager, ConfigScope } from "./config.js";
 import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
-import { ServerConfig, ProxyConfig } from "./types.js";
+import { ServerConfig, ProxyConfig, ProxyJumpConfig } from "./types.js";
 import { loadSanitizerConfig, saveSanitizerConfig, getSanitizerConfigPath, IpMode } from "./sanitizer-config.js";
 
 /**
@@ -20,7 +20,8 @@ function getConfigManager(scope?: ConfigScope): ConfigManager {
 function formatServer(server: ServerConfig): string {
   const auth = server.privateKeyPath ? `key:${server.privateKeyPath}` : "password";
   const proxy = server.proxy ? ` [proxy:${server.proxy.host}:${server.proxy.port}]` : "";
-  return `${server.name} (${server.username}@${server.host}:${server.port || 22}) [${auth}]${proxy}`;
+  const jump = server.proxyJump ? ` [jump:${server.proxyJump.username}@${server.proxyJump.host}:${server.proxyJump.port || 22}]` : "";
+  return `${server.name} (${server.username}@${server.host}:${server.port || 22}) [${auth}]${proxy}${jump}`;
 }
 
 /**
@@ -104,6 +105,11 @@ async function addServer(name?: string, options?: {
   proxyHost?: string;
   proxyPort?: string;
   proxyType?: string;
+  jumpHost?: string;
+  jumpPort?: string;
+  jumpUser?: string;
+  jumpKey?: string;
+  jumpPassword?: string;
 }): Promise<void> {
   // 确定配置级别
   let scope: ConfigScope | undefined;
@@ -265,6 +271,71 @@ async function addServer(name?: string, options?: {
           message: "代理密码:",
         });
       }
+    }
+  }
+
+  // ProxyJump 配置
+  if (!useProxy) {
+    const hasJumpOptions = !!(options?.jumpHost || options?.jumpUser);
+    let useJump = hasJumpOptions;
+
+    if (!hasJumpOptions) {
+      useJump = await confirm({
+        message: "是否使用 ProxyJump 跳板机?",
+        default: false,
+      });
+    }
+
+    if (useJump) {
+      const jumpHost = options?.jumpHost || await input({
+        message: "跳板机地址:",
+        validate: (v) => v.trim() ? true : "地址不能为空",
+      });
+
+      const jumpPort = options?.jumpPort
+        ? parseInt(options.jumpPort)
+        : parseInt(await input({
+          message: "跳板机端口:",
+          default: "22",
+        })) || 22;
+
+      const jumpUser = options?.jumpUser || await input({
+        message: "跳板机用户名:",
+        validate: (v) => v.trim() ? true : "用户名不能为空",
+      });
+
+      const jumpConfig: ProxyJumpConfig = {
+        host: jumpHost,
+        port: jumpPort,
+        username: jumpUser,
+      };
+
+      if (options?.jumpKey) {
+        jumpConfig.privateKeyPath = options.jumpKey;
+      } else if (options?.jumpPassword) {
+        jumpConfig.password = options.jumpPassword;
+      } else {
+        const jumpAuthType = await select({
+          message: "跳板机认证方式:",
+          choices: [
+            { name: "私钥", value: "key" },
+            { name: "密码", value: "password" },
+          ],
+        });
+
+        if (jumpAuthType === "key") {
+          jumpConfig.privateKeyPath = await input({
+            message: "跳板机私钥路径:",
+            default: "~/.ssh/id_rsa",
+          });
+        } else {
+          jumpConfig.password = await password({
+            message: "跳板机密码:",
+          });
+        }
+      }
+
+      server.proxyJump = jumpConfig;
     }
   }
 
@@ -483,6 +554,9 @@ async function interactiveConfig(): Promise<void> {
           if (server.proxy) {
             console.log(`  代理: ${server.proxy.host}:${server.proxy.port} (SOCKS${server.proxy.type || 5})`);
           }
+          if (server.proxyJump) {
+            console.log(`  跳板机: ${server.proxyJump.username}@${server.proxyJump.host}:${server.proxyJump.port || 22}`);
+          }
           console.log("\n重新输入新配置:\n");
 
           await addServerToManager(configManager, server.name);
@@ -687,6 +761,58 @@ async function addServerToManager(configManager: ConfigManager, existingName?: s
     }
   }
 
+  // ProxyJump 配置（仅在不使用代理时可选）
+  if (!server.proxy) {
+    const useJump = await confirm({
+      message: "是否使用 ProxyJump 跳板机?",
+      default: false,
+    });
+
+    if (useJump) {
+      const jumpHost = await input({
+        message: "跳板机地址:",
+        validate: (v) => v.trim() ? true : "地址不能为空",
+      });
+
+      const jumpPortStr = await input({
+        message: "跳板机端口:",
+        default: "22",
+      });
+
+      const jumpUser = await input({
+        message: "跳板机用户名:",
+        validate: (v) => v.trim() ? true : "用户名不能为空",
+      });
+
+      const jumpAuthType = await select({
+        message: "跳板机认证方式:",
+        choices: [
+          { name: "私钥", value: "key" },
+          { name: "密码", value: "password" },
+        ],
+      });
+
+      const jumpConfig: ProxyJumpConfig = {
+        host: jumpHost,
+        port: parseInt(jumpPortStr) || 22,
+        username: jumpUser,
+      };
+
+      if (jumpAuthType === "key") {
+        jumpConfig.privateKeyPath = await input({
+          message: "跳板机私钥路径:",
+          default: "~/.ssh/id_rsa",
+        });
+      } else {
+        jumpConfig.password = await password({
+          message: "跳板机密码:",
+        });
+      }
+
+      server.proxyJump = jumpConfig;
+    }
+  }
+
   configManager.addServer(server);
   console.log(`\n✓ 服务器 '${serverName}' 已保存`);
 }
@@ -822,6 +948,11 @@ export function createCLI(): Command {
     .option("--proxy-host <host>", "代理地址")
     .option("--proxy-port <port>", "代理端口")
     .option("--proxy-type <type>", "代理类型 (4 或 5)")
+    .option("--jump-host <host>", "ProxyJump 跳板机地址")
+    .option("--jump-port <port>", "ProxyJump 跳板机端口")
+    .option("--jump-user <user>", "ProxyJump 跳板机用户名")
+    .option("--jump-key <path>", "ProxyJump 跳板机私钥路径")
+    .option("--jump-password <password>", "ProxyJump 跳板机密码")
     .action(addServer);
 
   program
