@@ -92,9 +92,17 @@ export class SSHManager {
     }
 
     return new Promise((resolve, reject) => {
-      this.client = new Client();
+      const client = new Client();
+      this.client = client;
 
-      this.client.on("ready", async () => {
+      client.on("ready", async () => {
+        // 检查是否已被 cleanup（竞态保护）
+        if (this.client !== client) {
+          client.end();
+          reject(new Error("连接已被取消"));
+          return;
+        }
+
         this.isConnected = true;
         this.isLocalConnection = false;
         this.currentServer = config;
@@ -102,9 +110,9 @@ export class SSHManager {
         // 注册敏感信息到过滤器
         this.registerSensitiveInfo(config);
 
-        // 连接成功后自动打开 shell
+        // 连接成功后自动打开 shell（使用局部变量避免竞态）
         try {
-          await this.shellManager.open(this.client!);
+          await this.shellManager.open(client);
           resolve();
         } catch (err) {
           this.cleanup();
@@ -112,13 +120,16 @@ export class SSHManager {
         }
       });
 
-      this.client.on("error", (err) => {
+      client.on("error", (err) => {
         this.cleanup();
         reject(err);
       });
 
-      this.client.on("close", () => {
-        this.cleanup();
+      client.on("close", () => {
+        // 仅当 client 仍是当前连接时才 cleanup
+        if (this.client === client) {
+          this.cleanup();
+        }
       });
 
       const connectConfig: Record<string, unknown> = {
@@ -165,17 +176,18 @@ export class SSHManager {
     const destPort = config.port || 22;
 
     // 第一步：连接跳板机
-    this.jumpClient = new Client();
+    const jumpClient = new Client();
+    this.jumpClient = jumpClient;
 
     const jumpStream = await new Promise<NodeJS.ReadWriteStream>((resolve, reject) => {
-      this.jumpClient!.on("ready", () => {
+      jumpClient.on("ready", () => {
         // 第二步：通过跳板机建立到目标的隧道
-        this.jumpClient!.forwardOut(
+        jumpClient.forwardOut(
           "127.0.0.1", 0,
           config.host, destPort,
           (err, stream) => {
             if (err) {
-              this.jumpClient!.end();
+              jumpClient.end();
               reject(new Error(`跳板机隧道创建失败: ${err.message}`));
             } else {
               resolve(stream);
@@ -184,7 +196,7 @@ export class SSHManager {
         );
       });
 
-      this.jumpClient!.on("error", (err) => {
+      jumpClient.on("error", (err) => {
         reject(new Error(`跳板机连接失败: ${err.message}`));
       });
 
@@ -213,14 +225,22 @@ export class SSHManager {
         return;
       }
 
-      this.jumpClient!.connect(jumpConfig);
+      jumpClient.connect(jumpConfig);
     });
 
     // 第三步：通过隧道连接目标服务器
     return new Promise((resolve, reject) => {
-      this.client = new Client();
+      const client = new Client();
+      this.client = client;
 
-      this.client.on("ready", async () => {
+      client.on("ready", async () => {
+        // 检查是否已被 cleanup（竞态保护）
+        if (this.client !== client) {
+          client.end();
+          reject(new Error("连接已被取消"));
+          return;
+        }
+
         this.isConnected = true;
         this.isLocalConnection = false;
         this.currentServer = config;
@@ -237,7 +257,7 @@ export class SSHManager {
         ]);
 
         try {
-          await this.shellManager.open(this.client!);
+          await this.shellManager.open(client);
           resolve();
         } catch (err) {
           this.cleanup();
@@ -245,13 +265,15 @@ export class SSHManager {
         }
       });
 
-      this.client.on("error", (err) => {
+      client.on("error", (err) => {
         this.cleanup();
         reject(err);
       });
 
-      this.client.on("close", () => {
-        this.cleanup();
+      client.on("close", () => {
+        if (this.client === client) {
+          this.cleanup();
+        }
       });
 
       const connectConfig: Record<string, unknown> = {
