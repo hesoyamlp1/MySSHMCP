@@ -1,4 +1,14 @@
 {
+  "shortcuts": {
+    "disk": {
+      "description": "查看磁盘使用情况",
+      "command": "df -h"
+    },
+    "docker-ps": {
+      "description": "查看容器状态",
+      "command": "docker ps --format 'table {{.Names}}\\t{{.Status}}'"
+    }
+  },
   "servers": [
     {
       "name": "my-server",
@@ -12,7 +22,46 @@
       "host": "10.0.0.50",
       "port": 22,
       "username": "ubuntu",
-      "password": "your-password"
+      "password": "your-password",
+      "sudoPassword": "your-sudo-password",
+      "shortcuts": {
+        "disk": {
+          "description": "本机只看根分区（覆盖全局 disk）",
+          "command": "df -h /"
+        },
+        "mysql_query": {
+          "description": "在测试库 MySQL 容器里执行任意 SQL（多行）",
+          "command": "docker exec -i mysql-test mysql -uroot -p{{secret.dbPwd}} app",
+          "stdin": "{{args.sql}}",
+          "args": [
+            { "name": "sql", "description": "要执行的 SQL 语句，可多行" }
+          ],
+          "secrets": {
+            "dbPwd": "your-mysql-root-password"
+          }
+        },
+        "set-loglevel": {
+          "description": "设置应用日志级别",
+          "command": "echo 'LOG_LEVEL={{args.level}}' > /tmp/log.conf",
+          "args": [
+            {
+              "name": "level",
+              "description": "日志级别",
+              "enum": ["debug", "info", "warn", "error"],
+              "default": "info"
+            }
+          ]
+        },
+        "restart-internal-app": {
+          "description": "重启内网 app 服务",
+          "runsOn": "internal-1（通过 dev-server 跳板）",
+          "command": "ssh internal-1 'systemctl restart app && systemctl status app'"
+        },
+        "applog": {
+          "description": "查看应用容器最近 100 行日志",
+          "command": "docker logs --tail 100 app"
+        }
+      }
     },
     {
       "name": "server-via-proxy",

@@ -15,6 +15,22 @@ export interface ProxyJumpConfig {
   passphrase?: string;
 }
 
+export interface ShortcutArg {
+  name: string;
+  description?: string;
+  enum?: string[];
+  default?: string;
+}
+
+export interface ShortcutConfig {
+  command: string;
+  stdin?: string;
+  description?: string;
+  runsOn?: string;
+  args?: ShortcutArg[];
+  secrets?: Record<string, string>;
+}
+
 export interface ServerConfig {
   name: string;
   host: string;
@@ -23,12 +39,15 @@ export interface ServerConfig {
   password?: string;
   privateKeyPath?: string;
   passphrase?: string;
+  sudoPassword?: string;
   proxy?: ProxyConfig;
   proxyJump?: ProxyJumpConfig;
+  shortcuts?: Record<string, ShortcutConfig>;
 }
 
 export interface ServersConfig {
   servers: ServerConfig[];
+  shortcuts?: Record<string, ShortcutConfig>;
 }
 
 export interface CommandResult {

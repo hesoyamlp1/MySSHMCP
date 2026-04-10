@@ -6,7 +6,6 @@ import { SocksClient } from "socks";
 import { ServerConfig, ConnectionStatus, ProxyConfig, ProxyJumpConfig } from "./types.js";
 import { ShellManager } from "./shell-manager.js";
 import { SFTPManager } from "./sftp-manager.js";
-import { getSanitizer } from "./sanitizer.js";
 
 // 内置的本地服务器配置
 export const LOCAL_SERVER: ServerConfig = {
@@ -106,9 +105,6 @@ export class SSHManager {
         this.isConnected = true;
         this.isLocalConnection = false;
         this.currentServer = config;
-
-        // 注册敏感信息到过滤器
-        this.registerSensitiveInfo(config);
 
         // 连接成功后自动打开 shell（使用局部变量避免竞态）
         try {
@@ -245,17 +241,6 @@ export class SSHManager {
         this.isLocalConnection = false;
         this.currentServer = config;
 
-        this.registerSensitiveInfo(config);
-        // 也注册跳板机的敏感信息
-        const sanitizer = getSanitizer();
-        sanitizer.addSensitiveValues([
-          jump.host,
-          jump.password,
-          jump.passphrase,
-          jump.username,
-          jump.privateKeyPath,
-        ]);
-
         try {
           await this.shellManager.open(client);
           resolve();
@@ -345,24 +330,6 @@ export class SSHManager {
     this.currentServer = null;
     this.client = null;
     this.jumpClient = null;
-    // 清除敏感信息
-    getSanitizer().clearSensitiveValues();
-  }
-
-  /**
-   * 注册服务器配置中的敏感信息
-   */
-  private registerSensitiveInfo(config: ServerConfig): void {
-    const sanitizer = getSanitizer();
-    sanitizer.addCategorizedSensitiveValues([
-      { value: config.host, category: "host" },
-      { value: config.password, category: "password" },
-      { value: config.passphrase, category: "password" },
-      { value: config.username, category: "username" },
-      { value: config.privateKeyPath, category: "key" },
-      { value: config.proxy?.host, category: "host" },
-      { value: config.proxy?.password, category: "password" },
-    ]);
   }
 
   getClient(): Client | null {

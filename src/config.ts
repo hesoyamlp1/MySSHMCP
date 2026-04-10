@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join, dirname } from "path";
-import { ServersConfig, ServerConfig } from "./types.js";
+import { ServersConfig, ServerConfig, ShortcutConfig } from "./types.js";
+import { validateShortcut } from "./shortcut-renderer.js";
 
 export type ConfigScope = "local" | "global";
 
@@ -77,6 +78,7 @@ export class ConfigManager {
     try {
       const content = readFileSync(this.configPath, "utf-8");
       this.config = JSON.parse(content);
+      this.validateShortcuts();
       return this.config!;
     } catch (error) {
       if (error instanceof SyntaxError) {
@@ -84,6 +86,44 @@ export class ConfigManager {
       }
       throw error;
     }
+  }
+
+  private validateShortcuts(): void {
+    if (!this.config) return;
+    if (this.config.shortcuts) {
+      for (const [name, cfg] of Object.entries(this.config.shortcuts)) {
+        validateShortcut("<global>", name, cfg);
+      }
+    }
+    for (const server of this.config.servers) {
+      if (!server.shortcuts) continue;
+      for (const [name, cfg] of Object.entries(server.shortcuts)) {
+        validateShortcut(server.name, name, cfg);
+      }
+    }
+  }
+
+  /**
+   * 返回某台服务器最终生效的 shortcut 字典：
+   * 全局 shortcuts ∪ 该服务器自己的 shortcuts，同名时服务器级覆盖全局。
+   */
+  getEffectiveShortcuts(serverName: string): Record<string, ShortcutConfig> {
+    if (!this.config) this.load();
+    const global = this.config!.shortcuts ?? {};
+    const server = this.config!.servers.find((s) => s.name === serverName);
+    const own = server?.shortcuts ?? {};
+    return { ...global, ...own };
+  }
+
+  /**
+   * 判断某条 shortcut 来自全局还是服务器级（用于 summarize 的 source 字段）
+   */
+  getShortcutSource(serverName: string, shortcutName: string): "global" | "server" | null {
+    if (!this.config) this.load();
+    const server = this.config!.servers.find((s) => s.name === serverName);
+    if (server?.shortcuts && shortcutName in server.shortcuts) return "server";
+    if (this.config!.shortcuts && shortcutName in this.config!.shortcuts) return "global";
+    return null;
   }
 
   save(): void {
