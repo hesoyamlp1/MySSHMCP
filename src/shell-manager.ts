@@ -59,15 +59,14 @@ export class ShellManager {
   }
 
   /**
-   * 打开本地 Shell（使用 node-pty 创建真正的 PTY）
+   * 打开本地 Shell（使用 node-pty 创建真正的 PTY）。
+   * PTY 申请失败时抛错，由调用方（SSHManager.connectLocal）决定是否降级。
    */
   async openLocal(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        // 检测系统默认 shell
         const shellPath = process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "/bin/sh");
 
-        // 使用 node-pty 创建真正的 PTY
         const ptyProc = pty.spawn(shellPath, [], {
           name: "xterm-256color",
           cols: 120,
@@ -79,7 +78,6 @@ export class ShellManager {
         this.ptyProcess = ptyProc;
         this.isLocal = true;
 
-        // 创建统一的 stream 接口
         const dataListeners: ((data: Buffer) => void)[] = [];
         const closeListeners: (() => void)[] = [];
         const errorListeners: ((err: Error) => void)[] = [];
@@ -92,30 +90,19 @@ export class ShellManager {
         });
 
         const stream: ShellStream = {
-          write: (data: string) => {
-            ptyProc.write(data);
-          },
-          end: () => {
-            ptyProc.kill();
-          },
+          write: (data: string) => ptyProc.write(data),
+          end: () => ptyProc.kill(),
           on: ((event: string, listener: unknown) => {
-            if (event === "data") {
-              dataListeners.push(listener as (data: Buffer) => void);
-            } else if (event === "close") {
-              closeListeners.push(listener as () => void);
-            } else if (event === "error") {
-              errorListeners.push(listener as (err: Error) => void);
-            }
+            if (event === "data") dataListeners.push(listener as (data: Buffer) => void);
+            else if (event === "close") closeListeners.push(listener as () => void);
+            else if (event === "error") errorListeners.push(listener as (err: Error) => void);
           }) as ShellStream["on"],
         };
 
         this.shell = stream;
         this.setupStream(stream);
 
-        // 等待初始提示符
-        setTimeout(() => {
-          resolve();
-        }, 500);
+        setTimeout(() => resolve(), 500);
       } catch (error) {
         reject(new Error(`无法打开本地 shell: ${error instanceof Error ? error.message : String(error)}`));
       }

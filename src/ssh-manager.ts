@@ -1,6 +1,6 @@
 import { Client } from "ssh2";
 import { readFileSync } from "fs";
-import { homedir } from "os";
+import { homedir, userInfo } from "os";
 import { join } from "path";
 import { SocksClient } from "socks";
 import { ServerConfig, ConnectionStatus, ProxyConfig, ProxyJumpConfig } from "./types.js";
@@ -57,7 +57,10 @@ export class SSHManager {
   }
 
   /**
-   * 本地连接
+   * 本地连接。优先用 node-pty 开真 PTY；
+   * 若 PTY 申请失败（典型原因：macOS launchd 托管的 daemon 无 TTY session），
+   * 自动降级为"SSH loopback"——通过 ssh2 连 127.0.0.1 走自家 sshd，
+   * sshd 会分配真 PTY，对 LLM 完全透明。
    */
   private async connectLocal(): Promise<void> {
     try {
@@ -65,10 +68,86 @@ export class SSHManager {
       this.isConnected = true;
       this.isLocalConnection = true;
       this.currentServer = LOCAL_SERVER;
+      return;
     } catch (error) {
-      this.cleanup();
-      throw error;
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[mcp-ssh-pty] local PTY failed (${msg}); falling back to ssh loopback 127.0.0.1:22`);
+      try {
+        await this.connectLoopbackSSH();
+      } catch (loopErr) {
+        this.cleanup();
+        const loopMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
+        throw new Error(`无法打开本地 shell（PTY 失败：${msg}；loopback SSH 失败：${loopMsg}）`);
+      }
     }
+  }
+
+  /**
+   * SSH loopback：连 127.0.0.1:22 当作 local shell。
+   * 前置：当前用户 ~/.ssh/authorized_keys 里要有本机的一把 pub key。
+   */
+  private async connectLoopbackSSH(): Promise<void> {
+    const username = process.env.USER || userInfo().username;
+    const keyCandidates = [
+      join(homedir(), ".ssh", "id_ed25519"),
+      join(homedir(), ".ssh", "id_rsa"),
+    ];
+    let privateKey: Buffer | null = null;
+    let usedKeyPath: string | null = null;
+    for (const kp of keyCandidates) {
+      try {
+        privateKey = readFileSync(kp);
+        usedKeyPath = kp;
+        break;
+      } catch { /* try next */ }
+    }
+    if (!privateKey) {
+      throw new Error("找不到可用私钥（~/.ssh/id_ed25519 或 ~/.ssh/id_rsa）");
+    }
+
+    return new Promise((resolve, reject) => {
+      const client = new Client();
+      this.client = client;
+
+      client.on("ready", async () => {
+        if (this.client !== client) {
+          client.end();
+          reject(new Error("连接已被取消"));
+          return;
+        }
+        this.isConnected = true;
+        this.isLocalConnection = true; // 对外仍标记 local，保持行为一致
+        this.currentServer = LOCAL_SERVER;
+        try {
+          await this.shellManager.open(client);
+          console.error(`[mcp-ssh-pty] local fallback: ssh ${username}@127.0.0.1 via ${usedKeyPath}`);
+          resolve();
+        } catch (err) {
+          this.cleanup();
+          reject(err);
+        }
+      });
+
+      client.on("error", (err) => {
+        this.cleanup();
+        reject(err);
+      });
+
+      client.on("close", () => {
+        if (this.client === client) this.cleanup();
+      });
+
+      client.connect({
+        host: "127.0.0.1",
+        port: 22,
+        username,
+        privateKey,
+        // loopback 无 MITM 风险，跳过 host key 校验
+        hostVerifier: () => true,
+        keepaliveInterval: 10000,
+        keepaliveCountMax: 3,
+      });
+    });
   }
 
   /**
