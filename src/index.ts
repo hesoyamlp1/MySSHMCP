@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer as createHttpServer, IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { SSHManager } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
 import { NotesManager } from "./notes-manager.js";
@@ -87,24 +88,27 @@ async function startStdioServer(): Promise<void> {
   process.on("SIGTERM", cleanup);
 }
 
+interface Session {
+  transport: StreamableHTTPServerTransport;
+  server: McpServer;
+  sshManager: SSHManager;
+}
+
+function isInitializeRequest(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const b = body as { method?: unknown };
+  return b.method === "initialize";
+}
+
 /**
- * 启动 HTTP MCP 服务器（stateless 模式）
- * - 监听 POST/GET/DELETE /mcp
- * - 每个请求构造全新的 McpServer + SSHManager，避免跨请求污染
- *   注意：这意味着 HTTP 模式下 "一次调用 = 一次性连接"，无法像 stdio 那样维持 PTY 会话
- *   如果需要跨调用的 PTY 会话，需使用 stateful 模式（后续 phase）
- *
- * ⚠️ Phase 1 简化：本版本 HTTP 模式暂按 stateful 实现，整个进程共享单一 SSHManager
- *    这对"一台 mac 服务一个 VPS Claude Code"的单用户场景最简单；生产级多用户需要 stateful+sessionId。
+ * 启动 HTTP MCP 服务器（stateful 模式，SDK canonical pattern）
+ * - 每个 initialize 请求新建一个 Session（独立 McpServer + SSHManager + transport）
+ * - 后续请求通过 Mcp-Session-Id header 路由到对应 session
+ * - DELETE /mcp 带 session-id 清理 session
+ * - SSHManager 状态随 session 保持（一个 VPS Claude Code 连一个 mac daemon，即一个 session）
  */
 async function startHttpServer(opts: HttpOptions): Promise<void> {
-  const { server, sshManager } = buildServer();
-
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined, // stateless：不生成 sessionId，整个进程一个 transport
-  });
-
-  await server.connect(transport);
+  const sessions = new Map<string, Session>();
 
   const readBody = (req: IncomingMessage): Promise<string> =>
     new Promise((resolve, reject) => {
@@ -124,21 +128,24 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
 
   const httpServer = createHttpServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
-      // CORS（本地回环绑定通常不需要，但保留基础支持）
       if (req.method === "OPTIONS") {
         res.writeHead(204, {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id",
+          "Access-Control-Expose-Headers": "Mcp-Session-Id",
         });
         res.end();
         return;
       }
 
-      // 健康检查
       if (req.method === "GET" && req.url === "/health") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, name: "ssh-mcp-server" }));
+        res.end(JSON.stringify({
+          ok: true,
+          name: "ssh-mcp-server",
+          activeSessions: sessions.size,
+        }));
         return;
       }
 
@@ -168,9 +175,47 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
         }
       }
 
-      await transport.handleRequest(req, res, parsedBody);
+      const sessionIdHeader = req.headers["mcp-session-id"];
+      const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+
+      let session: Session | undefined;
+
+      if (sessionId && sessions.has(sessionId)) {
+        session = sessions.get(sessionId);
+      } else if (req.method === "POST" && isInitializeRequest(parsedBody)) {
+        const { server, sshManager } = buildServer();
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sid: string) => {
+            const sess: Session = { transport, server, sshManager };
+            sessions.set(sid, sess);
+            console.error(`[mcp-ssh-pty] session opened: ${sid} (active=${sessions.size})`);
+          },
+        });
+        transport.onclose = () => {
+          const sid = transport.sessionId;
+          if (sid && sessions.has(sid)) {
+            sessions.delete(sid);
+            sshManager.disconnect().catch(() => {});
+            console.error(`[mcp-ssh-pty] session closed: ${sid} (active=${sessions.size})`);
+          }
+        };
+        await server.connect(transport);
+        session = { transport, server, sshManager };
+      } else {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: "bad_request",
+          message: "missing or invalid Mcp-Session-Id; initialize first",
+        }));
+        return;
+      }
+
+      await session!.transport.handleRequest(req, res, parsedBody);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      console.error(`[mcp-ssh-pty] request error: ${msg}\n${stack ?? ""}`);
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "internal_error", message: msg }));
@@ -187,8 +232,11 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
 
   const cleanup = async () => {
     httpServer.close();
-    await transport.close();
-    await sshManager.disconnect();
+    for (const sess of sessions.values()) {
+      await sess.transport.close().catch(() => {});
+      await sess.sshManager.disconnect().catch(() => {});
+    }
+    sessions.clear();
     process.exit(0);
   };
   process.on("SIGINT", cleanup);
