@@ -178,6 +178,33 @@ export class ConfigManager {
     return true;
   }
 
+  /**
+   * 规范化 hints：统一成 string[]，过滤空白条目；无则返回 undefined
+   */
+  private normalizeHints(raw: string | string[] | undefined): string[] | undefined {
+    if (!raw) return undefined;
+    const arr = Array.isArray(raw) ? raw : [raw];
+    const cleaned = arr.map((s) => s.trim()).filter(Boolean);
+    return cleaned.length > 0 ? cleaned : undefined;
+  }
+
+  /**
+   * 全局指令性提示（配置顶层 globalHints）
+   */
+  getGlobalHints(): string[] | undefined {
+    if (!this.config) this.load();
+    return this.normalizeHints(this.config!.globalHints);
+  }
+
+  /**
+   * 某台服务器的指令性提示（服务器级 hints）
+   */
+  getServerHints(serverName: string): string[] | undefined {
+    if (!this.config) this.load();
+    const s = this.config!.servers.find((s) => s.name === serverName);
+    return this.normalizeHints(s?.hints);
+  }
+
   getConfigPath(): string {
     return this.configPath;
   }

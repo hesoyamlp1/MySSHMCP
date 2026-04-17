@@ -1,4 +1,8 @@
 {
+  "globalHints": [
+    "VPS 和 mac 都注册了 SSH MCP — 跨机传文件优先用离源/目标最近的 MCP，不要经第三台机器中转",
+    "部署类操作优先用预配置的 shortcut，不要手动拼命令"
+  ],
   "shortcuts": {
     "disk": {
       "description": "查看磁盘使用情况",
@@ -24,6 +28,9 @@
       "username": "ubuntu",
       "password": "your-password",
       "sudoPassword": "your-sudo-password",
+      "hints": [
+        "这台的 /data 是挂载盘，写文件前确认剩余空间 >5GB"
+      ],
       "shortcuts": {
         "disk": {
           "description": "本机只看根分区（覆盖全局 disk）",

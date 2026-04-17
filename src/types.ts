@@ -43,11 +43,23 @@ export interface ServerConfig {
   proxy?: ProxyConfig;
   proxyJump?: ProxyJumpConfig;
   shortcuts?: Record<string, ShortcutConfig>;
+  /**
+   * 连接该服务器时注入到 connect 响应的指令性提示（区别于描述性的 notes）
+   * 例如 "部署这台必须走 deploy_kg shortcut，不要手动 cp jar"
+   */
+  hints?: string | string[];
 }
 
 export interface ServersConfig {
   servers: ServerConfig[];
   shortcuts?: Record<string, ShortcutConfig>;
+  /**
+   * 全局指令性提示。会注入到 list 和 connect 响应里。
+   * 用于告诉模型"跨工具/跨机器"层面的决策要点，例如：
+   * - "VPS 与 mac 都注册了 SSH MCP，跨机传文件优先用离源/目标最近的 MCP"
+   * - "部署用 deploy_kg shortcut，不要手动 cp jar"
+   */
+  globalHints?: string | string[];
 }
 
 export interface CommandResult {

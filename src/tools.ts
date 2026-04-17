@@ -74,13 +74,18 @@ export function registerTools(
       description: `SSH 远程服务器连接管理和 PTY Shell 交互。
 
 ## 连接管理 (action)
-- list: 列出所有可用服务器（附带备注摘要）
-- connect: 连接服务器（需提供 server 参数，自动附带完整备注）
+- list: 列出所有可用服务器（附带备注摘要，附带全局 hints）
+- connect: 连接服务器（需提供 server 参数，自动附带完整备注 + 全局 hints + 该服务器 hints）
 - disconnect: 断开当前连接
 - status: 查看连接状态和 shell 缓冲区行数
 - notes: 读写服务器备注（配合 content 参数写入）
 - sudo: 获取服务器的 sudo 密码（需在配置中设置 sudoPassword，或回退到登录 password）
 - shortcuts: 列出当前（或指定 server 的）所有 shortcut 详情（名称/描述/参数 schema）
+
+## Hints（指令性提示）
+运维者在 ssh-servers.json 顶层 globalHints 或服务器条目 hints 字段里配置的"模型必读"指引。
+list 响应附带 globalHints；connect 响应附带 globalHints + 该服务器 hints。
+典型用途：跨 MCP 拓扑决策、不要手动 cp jar、新特性提醒等。遇到 hints 字段务必按其指示行动。
 
 ## Shortcuts（命名命令模板）
 运维者可以在 ssh-servers.json 里为每个服务器预配置常用复杂命令（如 docker exec mysql 查询、tail 容器日志等）作为 shortcut。模型只需知道 shortcut 名和参数即可调用，复杂的命令拼接、容器内服务凭证完全对模型透明。
@@ -374,8 +379,12 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
               })),
             ];
 
+            const hints = configManager.getGlobalHints();
+            const payload: Record<string, unknown> = { servers: list };
+            if (hints) payload.hints = hints;
+
             return {
-              content: [{ type: "text", text: JSON.stringify(list, null, 2) }],
+              content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
             };
           }
 
@@ -390,12 +399,14 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             if (serverName === "local") {
               await sshManager.connect(LOCAL_SERVER);
               const notes = notesManager.read("local");
+              const globalHints = configManager.getGlobalHints();
               return {
                 content: [{
                   type: "text",
                   text: JSON.stringify({
                     message: "成功连接到本地 Shell",
                     notes: notes || undefined,
+                    hints: globalHints,
                   }, null, 2),
                 }],
               };
@@ -416,6 +427,12 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             await sshManager.connect(serverConfig);
 
             const notes = notesManager.read(serverName);
+            const globalHints = configManager.getGlobalHints();
+            const serverHints = configManager.getServerHints(serverName);
+            const mergedHints = [
+              ...(globalHints ?? []),
+              ...(serverHints ?? []),
+            ];
             return {
               content: [{
                 type: "text",
@@ -423,6 +440,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
                   message: `成功连接到 '${serverName}'，PTY Shell 已就绪`,
                   notes: notes || undefined,
                   shortcuts: summarizeShortcuts(configManager.getEffectiveShortcuts(serverName), "brief"),
+                  hints: mergedHints.length > 0 ? mergedHints : undefined,
                 }, null, 2),
               }],
             };
