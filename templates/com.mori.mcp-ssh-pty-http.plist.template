@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 部署时把 <USER>、<NODE_DIR>、<TOKEN> 替换成实际值。
+     参考 scripts/migrate-mac1.sh 做自动化处理（会自动探测 nvm node 路径）。 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mori.mcp-ssh-pty-http</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>PORT=27777; PID=$(lsof -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null); if [ -n "$PID" ]; then CMD=$(ps -p $PID -o comm= 2>/dev/null); case "$CMD" in *[Cc]ode*|*lectron*) kill -9 $PID; sleep 0.3;; esac; fi; exec <NODE_DIR>/mcp-ssh-pty --http --port $PORT --host 127.0.0.1</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string><NODE_DIR>:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/<USER></string>
+        <key>SHELL</key>
+        <string>/bin/zsh</string>
+        <key>MCP_HTTP_TOKEN</key>
+        <string><TOKEN></string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/<USER>/.mori/ssh/mcp-http.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/<USER>/.mori/ssh/mcp-http.err</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/<USER></string>
+</dict>
+</plist>
