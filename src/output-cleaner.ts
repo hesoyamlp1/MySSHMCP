@@ -25,6 +25,23 @@ export function stripAnsi(s: string): string {
 }
 
 /**
+ * 应用 backspace：终端 \b 把光标退一格，后续字符覆盖前一字符。
+ * 不处理的话 zsh 高亮模式下命令回显会变成 `eecho ...`、`lline1` 这种
+ * "首字符重复"，进而让命令回显剥离匹配失败。
+ */
+export function applyBackspace(s: string): string {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\b") {
+      out = out.slice(0, -1);
+    } else {
+      out += s[i];
+    }
+  }
+  return out;
+}
+
+/**
  * 折叠 \r：终端遇 \r 会把光标移回行首，后续字符覆盖前面，所以可见态只剩
  * 最后一个 \r 之后的部分。这一步顺带消掉了大部分 PTY 命令回显。
  *
@@ -37,7 +54,8 @@ export function foldCR(line: string): string {
 }
 
 export function cleanLine(line: string): string {
-  return foldCR(stripAnsi(line)).replace(CONTROL, "");
+  // 顺序：strip ANSI → 应用 \b → 折叠 \r → 删剩余控制字符
+  return foldCR(applyBackspace(stripAnsi(line))).replace(CONTROL, "");
 }
 
 // 偏保守：只在能看出"用户名/主机/路径"上下文时认成 prompt，避免把 100$、--> 这种内容误剥
