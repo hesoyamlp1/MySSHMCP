@@ -13,6 +13,15 @@
       "command": "docker ps --format 'table {{.Names}}\\t{{.Status}}'"
     }
   },
+  "localHints": [
+    "local 是 VPS 入口机本身，重活（构建/测试/起服务）尽量换到开发机 MCP 上跑"
+  ],
+  "localShortcuts": {
+    "ports": {
+      "description": "看本机在听的端口",
+      "command": "ss -tlnp"
+    }
+  },
   "servers": [
     {
       "name": "my-server",

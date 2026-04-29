@@ -95,6 +95,11 @@ export class ConfigManager {
         validateShortcut("<global>", name, cfg);
       }
     }
+    if (this.config.localShortcuts) {
+      for (const [name, cfg] of Object.entries(this.config.localShortcuts)) {
+        validateShortcut("<local>", name, cfg);
+      }
+    }
     for (const server of this.config.servers) {
       if (!server.shortcuts) continue;
       for (const [name, cfg] of Object.entries(server.shortcuts)) {
@@ -110,6 +115,10 @@ export class ConfigManager {
   getEffectiveShortcuts(serverName: string): Record<string, ShortcutConfig> {
     if (!this.config) this.load();
     const global = this.config!.shortcuts ?? {};
+    if (serverName === "local") {
+      const own = this.config!.localShortcuts ?? {};
+      return { ...global, ...own };
+    }
     const server = this.config!.servers.find((s) => s.name === serverName);
     const own = server?.shortcuts ?? {};
     return { ...global, ...own };
@@ -120,6 +129,11 @@ export class ConfigManager {
    */
   getShortcutSource(serverName: string, shortcutName: string): "global" | "server" | null {
     if (!this.config) this.load();
+    if (serverName === "local") {
+      if (this.config!.localShortcuts && shortcutName in this.config!.localShortcuts) return "server";
+      if (this.config!.shortcuts && shortcutName in this.config!.shortcuts) return "global";
+      return null;
+    }
     const server = this.config!.servers.find((s) => s.name === serverName);
     if (server?.shortcuts && shortcutName in server.shortcuts) return "server";
     if (this.config!.shortcuts && shortcutName in this.config!.shortcuts) return "global";
@@ -201,6 +215,9 @@ export class ConfigManager {
    */
   getServerHints(serverName: string): string[] | undefined {
     if (!this.config) this.load();
+    if (serverName === "local") {
+      return this.normalizeHints(this.config!.localHints);
+    }
     const s = this.config!.servers.find((s) => s.name === serverName);
     return this.normalizeHints(s?.hints);
   }
