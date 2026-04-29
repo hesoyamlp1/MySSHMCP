@@ -118,6 +118,40 @@ ss -tlnp | grep :27777
 curl -sS http://127.0.0.1:27777/health
 ```
 
+## 新机部署 / 换机时需要逐项确认（per-mac drift checklist）
+
+每台 mac 不一样的部分，按下面这张表逐条过：
+
+| 项 | 怎么取 / 怎么定 | 落到哪 |
+|---|---|---|
+| Node 路径 | `which node`（nvm 路径每台不同：`v22.18.0` / `v24.13.0` 等） | plist `ProgramArguments` 里 `exec <NODE_DIR>/mcp-ssh-pty` |
+| 用户名 / `$HOME` | `id -un` / `$HOME` | plist `HOME`、`StandardOutPath`、`WorkingDirectory` |
+| SSH keypair | 这台 mac 自己的 `~/.ssh/id_ed25519`（**每台单独一把**，不要互相 copy） | (a) 本机 `~/.ssh/authorized_keys`（让 ssh-loopback 通）<br>(b) GitHub 账号 SSH keys（让 git pull 走 SSH） |
+| Token | 与 VPS 侧 `claude mcp add` 的 Bearer 一致，多台 mac 复用同一个 token 即可 | `~/.mori/ssh/http-token` 600 权限 |
+| `ssh-servers.json` | 内网拓扑可能不同（每台 mac 能直连的内网机不一样） | `~/.mori/ssh/ssh-servers.json`，记得带 `globalHints`（含 tmux 长任务那条） |
+| `tmux` 是否安装 | `command -v tmux`，没有就 `brew install tmux` | tmux hint 才有意义 |
+| LANG / LC_ALL | 固定 `en_US.UTF-8`（macOS 默认带，`zh_CN.UTF-8` 不一定有） | **两个地方都要写**：<br>(a) plist `EnvironmentVariables`（让 daemon 进程有）<br>(b) `~/.zshenv` 里 `export LANG/LC_ALL`（sshd 不会从 daemon env 透传到 ssh-loopback 子 shell） |
+| Reverse tunnel | mac 上 `~/.ssh/config` 的 `Host vircs` 块加 `RemoteForward 27777 localhost:27777` | 不带这条 VPS 侧 `ss -tlnp \| grep 27777` 就空 |
+| sshd 开启 | System Settings → General → Sharing → Remote Login: ON，allowed users 包含当前用户 | 关了的话 ssh-loopback / VPS→mac 的 ssh 都会 ECONNRESET |
+
+最稳的路径还是跑 `scripts/mac-deploy.sh` / `scripts/migrate-mac1.sh`，脚本会自动探测 node 路径 + 写好 plist。手工部署时拿这张表对一遍即可。
+
+## kickstart vs bootout（改了 plist 必须 bootout，否则 plist 改动不生效）
+
+```bash
+# 改了 ssh-servers.json / 业务代码（npm i -g 之后）：进程重启即可
+launchctl kickstart -k gui/$(id -u)/com.mori.mcp-ssh-pty-http
+
+# 改了 plist 本身（增删 EnvironmentVariables、ProgramArguments、KeepAlive 之类）：
+#   kickstart 只是杀进程让 launchd 重启它，plist 的缓存定义不变 → 改动看不到
+#   必须 bootout + bootstrap 让 launchd 重新读 plist
+PLIST=~/Library/LaunchAgents/com.mori.mcp-ssh-pty-http.plist
+launchctl bootout gui/$(id -u) "$PLIST"
+launchctl bootstrap gui/$(id -u) "$PLIST"
+```
+
+判断方法：`launchctl print gui/$(id -u)/com.mori.mcp-ssh-pty-http | grep -A 10 environment` 看实际生效的 env，对不上 plist 文件就说明缓存没刷。
+
 ## Swap macs (mac1 offline → mac2 online)
 
 Same port 27777 is used; only one mac binds reverse tunnel at a time. No VPS-side change needed.
