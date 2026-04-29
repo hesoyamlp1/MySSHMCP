@@ -1,7 +1,17 @@
 import { Client, ClientChannel } from "ssh2";
 import { spawn, ChildProcess } from "child_process";
+import { randomBytes } from "crypto";
 import * as pty from "node-pty";
 import { ShellResult, ShellConfig } from "./types.js";
+import { cleanOutput, cleanLine, isPromptLine } from "./output-cleaner.js";
+
+export interface SendOptions {
+  /**
+   * 交互式模式：跳过 sentinel 包装。用于启动 REPL（mysql、python、ssh 跳板）
+   * 或向 REPL 内输入子命令。默认 false（包装 sentinel + 拿 exitCode）。
+   */
+  interactive?: boolean;
+}
 
 const DEFAULT_CONFIG: ShellConfig = {
   quickTimeout: 2000,
@@ -163,10 +173,17 @@ export class ShellManager {
 
   /**
    * 发送命令，智能等待完成
+   *
+   * 默认模式（非 interactive）：在用户命令后追加一条 sentinel printf，
+   * 出现 `__MCP_DONE_<nonce>_<rc>__` 字样即视为完成，并捕获 exit code。
+   * 这绕开了 prompt 正则永远列不全的结构问题。
+   *
+   * interactive=true：仅写入用户输入，不追加 sentinel。用于 REPL 启动 / REPL 内输入。
    */
   async send(
     input: string,
-    config?: Partial<ShellConfig>
+    config?: Partial<ShellConfig>,
+    options?: SendOptions
   ): Promise<ShellResult> {
     if (!this.shell) {
       return {
@@ -178,47 +195,65 @@ export class ShellManager {
     }
 
     const mergedConfig = { ...this.config, ...config };
+    const interactive = options?.interactive ?? false;
 
-    // 清空之前的输出，准备收集新输出
     const startLineCount = this.outputLines.length;
     this.outputBuffer = "";
 
-    // 发送命令
-    this.shell.write(input + "\n");
+    let sentinelNonce: string | undefined;
+    let sentinelRegex: RegExp | undefined;
+    if (interactive) {
+      this.shell.write(input + "\n");
+    } else {
+      sentinelNonce = randomBytes(8).toString("hex");
+      sentinelRegex = new RegExp(`__MCP_DONE_${sentinelNonce}_(\\d+)__`);
+      const sentinelCmd = `__MCP_RC=$?; printf '\\n__MCP_DONE_${sentinelNonce}_%d__\\n' "$__MCP_RC"`;
+      this.shell.write(input + "\n" + sentinelCmd + "\n");
+    }
 
-    // 等待命令完成
-    return await this.waitForCompletion(startLineCount, mergedConfig);
+    return await this.waitForCompletion(startLineCount, mergedConfig, sentinelRegex, sentinelNonce, input);
   }
 
   /**
-   * 读取缓冲区内容
+   * 读取缓冲区内容（默认清洗 ANSI / 命令回显 / prompt）
    * @param lines 返回行数：不传默认 20 行，-1 返回全部，正整数返回对应行数
    * @param offset 起始偏移，默认 0
    * @param clear 读取后是否清空缓冲区
+   * @param raw  true 时返回未清洗的原始 PTY 流（调试用）
    */
   read(
     lines?: number,
     offset?: number,
-    clear?: boolean
+    clear?: boolean,
+    raw?: boolean
   ): ShellResult {
     const startIdx = offset || 0;
 
-    // 处理 lines 参数：undefined 默认 20，-1 返回全部，其他返回指定行数
     const effectiveLines = lines === undefined ? 20 : (lines === -1 ? undefined : lines);
     const endIdx = effectiveLines ? startIdx + effectiveLines : this.outputLines.length;
     const selectedLines = this.outputLines.slice(startIdx, endIdx);
 
-    // 包含不完整的最后一行
-    let output = selectedLines.join("\n");
+    let outLines: string[];
+    let trailingBuffer = "";
     if (this.outputBuffer && (!effectiveLines || endIdx >= this.outputLines.length)) {
-      output += (output ? "\n" : "") + this.outputBuffer;
+      trailingBuffer = this.outputBuffer;
     }
+
+    if (raw) {
+      outLines = selectedLines.slice();
+      if (trailingBuffer) outLines.push(trailingBuffer);
+    } else {
+      const merged = trailingBuffer ? [...selectedLines, trailingBuffer] : selectedLines;
+      outLines = cleanOutput(merged);
+    }
+
+    const output = outLines.join("\n");
 
     const result: ShellResult = {
       output,
       totalLines: this.outputLines.length + (this.outputBuffer ? 1 : 0),
       complete: true,
-      message: `读取了 ${selectedLines.length} 行`,
+      message: `读取了 ${selectedLines.length} 行${raw ? "（raw）" : ""}`,
     };
 
     if (clear) {
@@ -281,11 +316,34 @@ export class ShellManager {
   }
 
   /**
-   * 私有方法：等待命令完成
+   * 扫描新输出（已收集的行 + 当前 buffer）寻找 sentinel，找到则返回 exit code
+   */
+  private scanSentinel(
+    startLineCount: number,
+    sentinelRegex: RegExp
+  ): number | null {
+    for (let i = startLineCount; i < this.outputLines.length; i++) {
+      const m = sentinelRegex.exec(this.outputLines[i]);
+      if (m) return parseInt(m[1], 10);
+    }
+    if (this.outputBuffer) {
+      const m = sentinelRegex.exec(this.outputBuffer);
+      if (m) return parseInt(m[1], 10);
+    }
+    return null;
+  }
+
+  /**
+   * 等待命令完成。两种模式：
+   * - sentinel 模式（sentinelRegex 非空）：见到 sentinel 立刻完成，捕获 exit code
+   * - interactive 模式（sentinelRegex 为空）：回退到 prompt + stable-output 启发式
    */
   private async waitForCompletion(
     startLineCount: number,
-    config: ShellConfig
+    config: ShellConfig,
+    sentinelRegex: RegExp | undefined,
+    sentinelNonce: string | undefined,
+    echoInput: string
   ): Promise<ShellResult> {
     const startTime = Date.now();
     let lastCheckTime = startTime;
@@ -296,22 +354,38 @@ export class ShellManager {
         const elapsed = Date.now() - startTime;
         const timeSinceLastOutput = Date.now() - this.lastOutputTime;
 
-        // 获取新输出
         const newLines = this.outputLines.slice(startLineCount);
-        const currentOutput = newLines.join("\n") +
-          (this.outputBuffer ? "\n" + this.outputBuffer : "");
 
-        // 获取最后一行用于提示符检测
-        // 处理 \r（回车）：取最后一个 \r 后面的内容，因为那才是当前可见的行
+        // ---- sentinel 模式：100% 确定性完成 ----
+        if (sentinelRegex) {
+          const rc = this.scanSentinel(startLineCount, sentinelRegex);
+          if (rc !== null) {
+            clearInterval(check);
+            const slow = elapsed > config.quickTimeout;
+            resolve(
+              this.buildResult({
+                rawNewLines: newLines,
+                trailingBuffer: this.outputBuffer,
+                totalLines: newLines.length,
+                complete: true,
+                truncated: false,
+                slow,
+                waiting: false,
+                exitCode: rc,
+                sentinelMarker: sentinelNonce,
+                echoInput,
+              })
+            );
+            return;
+          }
+        }
+
+        // ---- 回退：prompt 检测（interactive 或 sentinel 丢失时兜底）----
         let lastLine = this.outputBuffer ||
           (newLines.length > 0 ? newLines[newLines.length - 1] : "");
-        const lastCR = lastLine.lastIndexOf("\r");
-        if (lastCR !== -1) {
-          lastLine = lastLine.slice(lastCR + 1);
-        }
-        const hasPrompt = this.detectPrompt(lastLine);
+        const cleaned = cleanLine(lastLine);
+        const hasPrompt = isPromptLine(cleaned);
 
-        // 检测输出是否稳定（连续 3 次检查没有新输出）
         if (this.lastOutputTime <= lastCheckTime) {
           stableCount++;
         } else {
@@ -319,130 +393,112 @@ export class ShellManager {
         }
         lastCheckTime = Date.now();
 
-        // 策略 A: 快速 + 提示符（< 2秒）
-        if (elapsed <= config.quickTimeout && hasPrompt && stableCount >= 2) {
-          clearInterval(check);
-          resolve(this.buildResult(
-            currentOutput,
-            newLines.length,
-            true,
-            false,
-            false,
-            false
-          ));
-          return;
+        // interactive 模式：A/B 策略沿用 prompt 检测
+        if (!sentinelRegex) {
+          if (elapsed <= config.quickTimeout && hasPrompt && stableCount >= 2) {
+            clearInterval(check);
+            resolve(this.buildResult({
+              rawNewLines: newLines,
+              trailingBuffer: this.outputBuffer,
+              totalLines: newLines.length,
+              complete: true,
+              truncated: false,
+              slow: false,
+              waiting: false,
+              echoInput,
+            }));
+            return;
+          }
+          if (elapsed > config.quickTimeout && elapsed <= config.maxTimeout && hasPrompt && stableCount >= 2) {
+            clearInterval(check);
+            resolve(this.buildResult({
+              rawNewLines: newLines,
+              trailingBuffer: this.outputBuffer,
+              totalLines: newLines.length,
+              complete: true,
+              truncated: false,
+              slow: true,
+              waiting: false,
+              echoInput,
+            }));
+            return;
+          }
         }
 
-        // 策略 B: 慢速 + 提示符（2-5秒）
-        if (elapsed > config.quickTimeout && elapsed <= config.maxTimeout && hasPrompt && stableCount >= 2) {
-          clearInterval(check);
-          resolve(this.buildResult(
-            currentOutput,
-            newLines.length,
-            true,
-            false,
-            true,
-            false
-          ));
-          return;
-        }
-
-        // 策略 C: 超时（> 5秒）
+        // C: 超时（适用于 sentinel 丢失 / interactive 卡住）
         if (elapsed > config.maxTimeout) {
           clearInterval(check);
           const truncated = newLines.length > config.maxLines;
-          const truncatedLines = truncated
-            ? newLines.slice(-config.maxLines)
-            : newLines;
-          const truncatedOutput = truncatedLines.join("\n") +
-            (this.outputBuffer ? "\n" + this.outputBuffer : "");
-
-          resolve(this.buildResult(
-            truncatedOutput,
-            newLines.length,
-            hasPrompt,
+          const truncatedLines = truncated ? newLines.slice(-config.maxLines) : newLines;
+          resolve(this.buildResult({
+            rawNewLines: truncatedLines,
+            trailingBuffer: this.outputBuffer,
+            totalLines: newLines.length,
+            complete: hasPrompt,
             truncated,
-            true,
-            !hasPrompt
-          ));
+            slow: true,
+            waiting: !hasPrompt,
+            sentinelMarker: sentinelNonce,
+            echoInput,
+          }));
           return;
         }
 
-        // 策略 D: 输出稳定但无提示符
-        // 当 maxTimeout 较大时（长时间命令），允许更长的静默期，避免误判
-        const silenceThreshold = config.maxTimeout > DEFAULT_CONFIG.maxTimeout
-          ? Math.min(config.maxTimeout * 0.2, 10000)  // 最多 10 秒静默
-          : 500;
-        const stableThreshold = config.maxTimeout > DEFAULT_CONFIG.maxTimeout ? 10 : 5;
-        const minElapsed = config.maxTimeout > DEFAULT_CONFIG.maxTimeout
-          ? Math.min(config.maxTimeout * 0.5, 30000)  // 至少等一半时间
-          : 1000;
-        if (timeSinceLastOutput > silenceThreshold && stableCount >= stableThreshold && elapsed > minElapsed) {
-          clearInterval(check);
-          resolve(this.buildResult(
-            currentOutput,
-            newLines.length,
-            false,
-            false,
-            false,
-            true
-          ));
-          return;
+        // D: 输出稳定但无提示符（仅 interactive 模式启用，sentinel 模式只等 sentinel/超时）
+        if (!sentinelRegex) {
+          const silenceThreshold = config.maxTimeout > DEFAULT_CONFIG.maxTimeout
+            ? Math.min(config.maxTimeout * 0.2, 10000)
+            : 500;
+          const stableThreshold = config.maxTimeout > DEFAULT_CONFIG.maxTimeout ? 10 : 5;
+          const minElapsed = config.maxTimeout > DEFAULT_CONFIG.maxTimeout
+            ? Math.min(config.maxTimeout * 0.5, 30000)
+            : 1000;
+          if (timeSinceLastOutput > silenceThreshold && stableCount >= stableThreshold && elapsed > minElapsed) {
+            clearInterval(check);
+            resolve(this.buildResult({
+              rawNewLines: newLines,
+              trailingBuffer: this.outputBuffer,
+              totalLines: newLines.length,
+              complete: false,
+              truncated: false,
+              slow: false,
+              waiting: true,
+              echoInput,
+            }));
+            return;
+          }
         }
       }, 100);
     });
   }
 
   /**
-   * 私有方法：检测提示符
+   * 构建结果对象 —— 输出在此处经清洗管线（ANSI / 命令回显 / sentinel / prompt）后返回
    */
-  private detectPrompt(line: string): boolean {
-    // 移除 ANSI 转义序列（更完整的正则）
-    const cleanLine = line
-      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")  // 标准 ANSI 序列
-      .replace(/\x1b\][^\x07]*\x07/g, "")      // OSC 序列 (如 \e]2;...\a)
-      .replace(/\x1b\][^\x1b]*\x1b\\/g, "")    // OSC 序列 (如 \e]7;...\e\)
-      .replace(/[\x00-\x1f]/g, "")             // 其他控制字符
-      .trim();
+  private buildResult(args: {
+    rawNewLines: string[];
+    trailingBuffer: string;
+    totalLines: number;
+    complete: boolean;
+    truncated: boolean;
+    slow: boolean;
+    waiting: boolean;
+    exitCode?: number;
+    sentinelMarker?: string;
+    echoInput: string;
+  }): ShellResult {
+    const { rawNewLines, trailingBuffer, totalLines, complete, truncated, slow, waiting, exitCode, sentinelMarker } = args;
 
-    if (!cleanLine) return false;
+    const merged = trailingBuffer ? [...rawNewLines, trailingBuffer] : rawNewLines;
+    const cleanedLines = cleanOutput(merged, { sentinelMarker, echoInput: args.echoInput });
+    const output = cleanedLines.join("\n");
 
-    // 常见提示符模式
-    const patterns = [
-      /\$\s*$/,           // $ 结尾（普通用户）
-      /#\s*$/,            // # 结尾（root 用户）
-      />\s*$/,            // > 结尾（Windows/PowerShell）
-      /\]\$\s*$/,         // ]$ 结尾（[user@host dir]$）
-      /\]#\s*$/,          // ]# 结尾（[user@host dir]#）
-      /\)\s*[$#>]\s*$/,   // )$ 或 )# 结尾（一些自定义 PS1）
-      /~\s*[$#>]\s*$/,    // ~$ 结尾
-      /@.*:\s*[$#>]\s*$/, // user@host: $ 格式
-      /^➜\s+/,            // oh-my-zsh robbyrussell 主题 (➜ 开头)
-      /❯\s*$/,            // pure/starship 主题
-      /λ\s*$/,            // lambda 主题
-      /^\s*%\s*$/,        // zsh 默认提示符
-    ];
-
-    return patterns.some((p) => p.test(cleanLine));
-  }
-
-  /**
-   * 私有方法：构建结果对象
-   */
-  private buildResult(
-    output: string,
-    totalLines: number,
-    complete: boolean,
-    truncated: boolean,
-    slow: boolean,
-    waiting: boolean
-  ): ShellResult {
-    let message = "";
-
+    let message: string;
     if (complete) {
+      const rcSuffix = exitCode !== undefined ? `，exit=${exitCode}` : "";
       message = slow
-        ? `命令执行完成（耗时较长），共 ${totalLines} 行`
-        : `命令执行完成，共 ${totalLines} 行`;
+        ? `命令执行完成（耗时较长），共 ${totalLines} 行${rcSuffix}`
+        : `命令执行完成，共 ${totalLines} 行${rcSuffix}`;
     } else if (truncated) {
       message = `输出超时，已截断至最近 ${this.config.maxLines} 行（共 ${totalLines} 行）。使用 read 获取完整输出。`;
     } else if (waiting) {
@@ -458,6 +514,7 @@ export class ShellManager {
       truncated: truncated || undefined,
       slow: slow || undefined,
       waiting: waiting || undefined,
+      exitCode,
       message,
     };
   }

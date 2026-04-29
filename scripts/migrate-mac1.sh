@@ -110,6 +110,10 @@ cat > "$PLIST" <<PLIST
         <string>$HOME</string>
         <key>SHELL</key>
         <string>/bin/zsh</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+        <key>LC_ALL</key>
+        <string>en_US.UTF-8</string>
         <key>MCP_HTTP_TOKEN</key>
         <string>$TOKEN</string>
     </dict>

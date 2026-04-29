@@ -71,6 +71,14 @@ chmod 600 ~/.ssh/authorized_keys
 
 # Verify:
 ssh -o BatchMode=yes $USER@127.0.0.1 'echo ok'
+
+# d. UTF-8 locale for ssh-loopback shell (sshd 不会从 daemon env 透传 LANG)
+#    plist 里设 LANG 只让 daemon 进程有；loopback 出来的子 shell 由 sshd 起，
+#    会丢掉 LANG → 中文命令回显花屏 + locale 显示 C。zshenv 里 export 一下兜底。
+grep -q '^export LANG=' ~/.zshenv 2>/dev/null || cat >> ~/.zshenv <<'EOF'
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+EOF
 ```
 
 ### 4. SSH config on mac (reverse tunnel to VPS)
@@ -93,6 +101,8 @@ RemoteForward 27777 localhost:27777
 **Critical**: VSCode Remote-SSH grabs random high ports including 27777 on start. Naive plist → daemon loses race → EADDRINUSE. Fix: wrapper script checks `lsof -tiTCP:27777`, if owner is Code Helper / Electron → kill it → exec daemon.
 
 Template lives at `templates/com.mori.mcp-ssh-pty-http.plist` in this repo. **Node path (`v24.13.0` vs `v22.18.0`) must match host's nvm install** — the script handles this.
+
+**locale**: plist 里 `EnvironmentVariables` 必须含 `LANG=en_US.UTF-8` + `LC_ALL=en_US.UTF-8`。launchd 默认 env 极简，缺了这两个会让 `connect local` 起的 zsh 把中文输出搞成 mojibake（命令本身能跑，只是回显花屏）。模板和 `migrate-mac1.sh` 已内置。
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.mori.mcp-ssh-pty-http.plist

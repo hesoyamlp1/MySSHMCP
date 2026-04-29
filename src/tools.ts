@@ -119,20 +119,40 @@ list 响应附带 globalHints；connect 响应附带 globalHints + 该服务器 
 - read: 设为 true 读取缓冲区（配合 lines/offset/clear）
 - signal: 发送信号 SIGINT(Ctrl+C)/SIGTSTP(Ctrl+Z)/SIGQUIT
 
-## 智能输出检测
+## 输出清洗
+返回的 output 默认经过清洗：ANSI 控制序列、PTY 命令回显、bracketed-paste 标记、
+末尾 prompt 行都已剥离，只剩命令真实 stdout/stderr。需要原始 PTY 流时传 read({ raw: true })。
+
+## 完成检测（sentinel）
+默认在用户命令后追加一条 sentinel printf，见到 __MCP_DONE_<id>_<rc>__ 即视为完成，
+并在 result 里填 exitCode 字段。比传统 prompt 正则更稳，能直接判断成功失败。
+sentinel 字样会从输出里自动剥掉。
+
+启动 REPL（mysql/python/redis-cli/ssh 跳板）或向 REPL 内部输入子命令时，
+必须带 interactive=true 跳过 sentinel 包装，否则 sentinel printf 会被打进 REPL 当输入。
+
+## 智能输出检测（fallback / interactive 模式）
 - 快速命令（<2秒）：检测到提示符后返回
 - 慢速命令（2-5秒）：标记 slow=true
 - 超时命令（>maxTimeout）：截断到最近 200 行，标记 truncated=true
 - 持续输出：输出稳定后返回，标记 waiting=true
+
+## 命令疑似挂住（waiting=true / 长时间无输出）排查
+首先怀疑 stdout 全缓冲（pipe / 重定向 / 非 TTY 场景常见，命令明明在跑但缓冲到几 KB 才 flush）：
+- python: 命令前加 -u，或 PYTHONUNBUFFERED=1 python ...
+- 通用 unix 命令: stdbuf -oL -eL <cmd>（mac 自带的 stdbuf 名字是 gstdbuf，需 brew install coreutils）
+- mac 没装 coreutils 兜底: script -q /dev/null <cmd>（macOS 自带 script，能强制行缓冲）
+- tail 跟日志: tail -F 配合 --line-buffered（grep 也支持 --line-buffered）
 
 ## timeout 参数
 对于耗时较长的命令（如 pip install、apt upgrade、docker build 等），可以指定 timeout 参数（单位：秒，默认 5，最大 300）。
 服务端会在 timeout 时间内持续等待命令完成，避免反复轮询浪费上下文。
 
 ## 返回字段
-- output: 命令输出
-- totalLines: 总行数
-- complete: 是否完成（出现提示符）
+- output: 命令输出（已清洗）
+- totalLines: 原始 PTY 行数
+- complete: 是否完成
+- exitCode: 命令退出码（仅 sentinel 模式成功捕获时存在；undefined 表示未捕获）
 - truncated: 是否被截断
 - slow: 是否耗时较长
 - waiting: 可能在等待输入或仍在运行
@@ -197,9 +217,11 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
         shortcut: z.string().optional().describe("要执行的 shortcut 名称（运维预配置的命名命令）"),
         args: z.record(z.string()).optional().describe("shortcut 参数键值对，会被自动 shell-escape"),
         dryRun: z.boolean().optional().describe("仅用于 shortcut：渲染但不执行，secrets 显示为占位符"),
+        interactive: z.boolean().optional().describe("启动 REPL（mysql/python/redis-cli）或向 REPL 内部输入子命令时设 true，跳过 sentinel 包装"),
+        raw: z.boolean().optional().describe("仅用于 read：返回未清洗的原始 PTY 流（含 ANSI/控制序列），调试用"),
       },
     },
-    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun }): Promise<CallToolResult> => {
+    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun, interactive, raw }): Promise<CallToolResult> => {
       try {
         // 1. 发送信号
         if (signal) {
@@ -234,7 +256,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
           }
 
           const shellManager = sshManager.getShellManager();
-          const result = shellManager.read(lines, offset, clear);
+          const result = shellManager.read(lines, offset, clear, raw);
 
           return {
             content: [{
@@ -309,7 +331,11 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
           const timeoutMs = timeout
             ? Math.min(Math.max(timeout, 5), 300) * 1000
             : undefined;
-          const result = await shellManager.send(rendered, timeoutMs ? { maxTimeout: timeoutMs } : undefined);
+          const result = await shellManager.send(
+            rendered,
+            timeoutMs ? { maxTimeout: timeoutMs } : undefined,
+            { interactive: interactive ?? false }
+          );
 
           // 注意：不返回 rendered（含 secret 明文），只返回 shortcut name + args
           return {
@@ -340,7 +366,11 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
           const timeoutMs = timeout
             ? Math.min(Math.max(timeout, 5), 300) * 1000
             : undefined;
-          const result = await shellManager.send(command, timeoutMs ? { maxTimeout: timeoutMs } : undefined);
+          const result = await shellManager.send(
+            command,
+            timeoutMs ? { maxTimeout: timeoutMs } : undefined,
+            { interactive: interactive ?? false }
+          );
 
           return {
             content: [{
@@ -369,6 +399,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
                 connected: status.serverName === LOCAL_SERVER.name,
                 type: "built-in",
                 notes: notesManager.readSummary(LOCAL_SERVER.name),
+                shortcuts: summarizeShortcuts(configManager.getEffectiveShortcuts("local"), "names"),
               },
               ...servers.map((s) => ({
                 name: s.name,
@@ -400,13 +431,19 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
               await sshManager.connect(LOCAL_SERVER);
               const notes = notesManager.read("local");
               const globalHints = configManager.getGlobalHints();
+              const localHints = configManager.getServerHints("local");
+              const mergedHints = [
+                ...(globalHints ?? []),
+                ...(localHints ?? []),
+              ];
               return {
                 content: [{
                   type: "text",
                   text: JSON.stringify({
                     message: "成功连接到本地 Shell",
                     notes: notes || undefined,
-                    hints: globalHints,
+                    shortcuts: summarizeShortcuts(configManager.getEffectiveShortcuts("local"), "brief"),
+                    hints: mergedHints.length > 0 ? mergedHints : undefined,
                   }, null, 2),
                 }],
               };
@@ -585,7 +622,14 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
               return {
                 content: [{
                   type: "text",
-                  text: JSON.stringify({ server: "local", shortcuts: [] }, null, 2),
+                  text: JSON.stringify({
+                    server: "local",
+                    shortcuts: summarizeShortcuts(
+                      configManager.getEffectiveShortcuts("local"),
+                      "full",
+                      (name) => configManager.getShortcutSource("local", name)
+                    ),
+                  }, null, 2),
                 }],
               };
             }
