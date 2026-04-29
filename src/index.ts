@@ -5,14 +5,27 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer as createHttpServer, IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { SSHManager } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
 import { NotesManager } from "./notes-manager.js";
 import { registerTools } from "./tools.js";
 import { runCLI } from "./cli.js";
 
+const PKG_VERSION: string = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf-8"));
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
+
 // CLI 命令列表
-const CLI_COMMANDS = ["list", "add", "remove", "rm", "test", "config", "help", "--help", "-h", "--version", "-V"];
+const CLI_COMMANDS = ["list", "add", "remove", "rm", "test", "config", "help", "--help", "-h", "--version", "-v"];
 
 interface HttpOptions {
   port: number;
@@ -61,7 +74,7 @@ function isCLIMode(): boolean {
 function buildServer(): { server: McpServer; sshManager: SSHManager } {
   const server = new McpServer({
     name: "ssh-mcp-server",
-    version: "1.0.0",
+    version: PKG_VERSION,
   });
 
   const sshManager = new SSHManager();

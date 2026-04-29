@@ -2,9 +2,22 @@
 
 import { Command } from "commander";
 import { select, input, password, confirm } from "@inquirer/prompts";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import { ConfigManager, ConfigScope } from "./config.js";
 import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
 import { ServerConfig, ProxyConfig, ProxyJumpConfig } from "./types.js";
+
+const PKG_VERSION: string = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf-8"));
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 
 /**
  * 获取 ConfigManager 实例
@@ -820,7 +833,7 @@ export function createCLI(): Command {
   program
     .name("mcp-ssh-pty")
     .description("SSH MCP Server with PTY shell support")
-    .version("1.0.0");
+    .version(PKG_VERSION, "-v, --version", "显示当前版本号");
 
   program
     .command("list")
