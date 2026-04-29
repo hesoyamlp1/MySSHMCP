@@ -1,7 +1,8 @@
 {
   "globalHints": [
     "VPS 和 mac 都注册了 SSH MCP — 跨机传文件优先用离源/目标最近的 MCP，不要经第三台机器中转",
-    "部署类操作优先用预配置的 shortcut，不要手动拼命令"
+    "部署类操作优先用预配置的 shortcut，不要手动拼命令",
+    "长任务（>5 分钟：构建/训练/批量导入/跑 chat 服务）不要硬等 timeout，起 tmux：tmux new -d -s <name> 'cmd > /tmp/<name>.log 2>&1'。看进度 tmux capture-pane -t <name> -p | tail -50；列表 tmux ls；中断 tmux send-keys -t <name> C-c；清理 tmux kill-session -t <name>。比 nohup+pid 稳，session 死了不留僵尸。"
   ],
   "shortcuts": {
     "disk": {
