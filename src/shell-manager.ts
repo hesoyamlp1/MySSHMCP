@@ -288,6 +288,37 @@ export class ShellManager {
   }
 
   /**
+   * 强制复位当前行：发 Ctrl-C → 短暂等待 → Ctrl-U → 换行。
+   * 用于卡在 heredoc> / dquote> / cmdand 等续行 prompt 时。
+   * 故意不发 Ctrl-D（会把 shell 关掉）。
+   */
+  async resetLine(): Promise<boolean> {
+    if (!this.shell) return false;
+    this.shell.write("\x03");           // 中断当前命令 / 退出续行 prompt
+    await new Promise((r) => setTimeout(r, 80));
+    if (!this.shell) return false;
+    this.shell.write("\x15\n");         // 清空行缓冲 + 拿一个干净 prompt
+    return true;
+  }
+
+  /**
+   * 用一个外部提供的"重开 shell"回调来重置。该回调由 SSHManager 注入：
+   * 它知道当前是 local pty 还是 ssh client，由它决定重开方式。
+   * 此处只负责关掉旧 shell 并清空缓冲区。
+   */
+  async hardReset(reopen: () => Promise<void>): Promise<void> {
+    if (this.shell) {
+      try { this.shell.end(); } catch { /* ignore */ }
+    }
+    this.shell = null;
+    this.localProcess = null;
+    this.ptyProcess = null;
+    this.outputBuffer = "";
+    this.outputLines = [];
+    await reopen();
+  }
+
+  /**
    * 关闭 shell
    */
   close(): void {

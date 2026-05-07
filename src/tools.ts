@@ -6,7 +6,8 @@ import { ConfigManager } from "./config.js";
 import { NotesManager } from "./notes-manager.js";
 import { ShortcutConfig } from "./types.js";
 import { saveIfLarge } from "./output-store.js";
-import { renderShortcut } from "./shortcut-renderer.js";
+import { renderShortcut, renderShortcutSplit } from "./shortcut-renderer.js";
+import { execLocal, execRemote, ExecResult } from "./exec-runner.js";
 
 /**
  * 检查输出是否过大，如果过大则保存到本地文件并截断返回
@@ -31,6 +32,56 @@ function truncateIfLarge(resultObj: Record<string, unknown>): string {
   };
 
   return JSON.stringify(truncated, null, 2);
+}
+
+/**
+ * 跑一条 exec（绕过 PTY）：local 走 child_process，远端走 ssh2 client.exec
+ */
+async function runExec(
+  sshManager: SSHManager,
+  command: string,
+  stdin: string | undefined,
+  timeoutMs: number | undefined
+): Promise<ExecResult> {
+  if (sshManager.isLocal()) {
+    return execLocal(command, { stdin, timeoutMs });
+  }
+  const client = sshManager.getClient();
+  if (!client) throw new Error("SSH Client 不可用（请先连接）");
+  return execRemote(client, command, { stdin, timeoutMs });
+}
+
+/**
+ * 把 ExecResult 包装成模型友好的 JSON。stdout/stderr 各自检查是否过大。
+ */
+function shapeExecResult(
+  base: Record<string, unknown>,
+  result: ExecResult
+): string {
+  const payload: Record<string, unknown> = {
+    ...base,
+    exitCode: result.exitCode,
+    timedOut: result.timedOut || undefined,
+    truncated: result.truncated || undefined,
+    signal: result.signal,
+    bytesStdout: result.bytesStdout,
+    bytesStderr: result.bytesStderr,
+    stdout: result.stdout,
+    stderr: result.stderr || undefined,
+    mode: "exec",
+  };
+  // 复用 truncateIfLarge：把 stdout 当作 output 字段过一遍
+  // 单独处理：stdout 大时存盘
+  const stdoutSave = saveIfLarge(result.stdout);
+  if (stdoutSave.saved) {
+    payload.stdout = stdoutSave.tail;
+    payload._overflow = {
+      totalChars: stdoutSave.totalChars,
+      savedTo: stdoutSave.filePath,
+      hint: `⚠️ stdout 过长（${stdoutSave.totalChars} 字符），完整内容保存至 ${stdoutSave.filePath}，仅显示尾部 2000 字符。`,
+    };
+  }
+  return JSON.stringify(payload, null, 2);
 }
 
 /**
@@ -115,9 +166,23 @@ list 响应附带 globalHints；connect 响应附带 globalHints + 该服务器 
 ## 命令执行 (command)
 直接提供 command 参数执行命令，支持交互式程序。
 
+### 默认路径：PTY shell（持久 session）
+适合：cd / source / 启动 REPL / 跟踪日志 / 短促命令。环境（cwd / env / shell 状态）会被后续命令继承。
+
+### 替代路径：exec 通道（独立、无 PTY）
+触发条件：传入 stdin 参数 **或** 显式 exec=true。
+适合：
+- 多行内容做命令的 stdin（kubectl apply -f -、python3 -、psql、jq 等）—— **必用** exec，PTY heredoc 极易被 bracketed-paste 弄花
+- 任何只关心 stdout/stderr/exitCode 的一次性命令
+exec 路径**不继承** PTY shell 当前 cwd 和 env，每次都是 sshd 默认环境（远端）/ daemon cwd（local）。
+如果命令依赖前一句 cd 后的工作目录，要么显式 'cd /xxx && your-cmd' 一次写完，要么继续走 PTY。
+
 ## Shell 控制
 - read: 设为 true 读取缓冲区（配合 lines/offset/clear）
-- signal: 发送信号 SIGINT(Ctrl+C)/SIGTSTP(Ctrl+Z)/SIGQUIT
+- signal: 发送信号
+  - SIGINT(Ctrl+C) / SIGTSTP(Ctrl+Z) / SIGQUIT
+  - RESET：Ctrl-C → 等待 → Ctrl-U → 换行。卡在 heredoc>/dquote>/cmdand 续行 prompt 时用，比单 SIGINT 狠
+- action=reset_shell：保留 SSH 连接，**关掉当前 PTY shell 重开一条**。RESET 都救不回来时用，比 disconnect+reconnect 快
 
 ## 输出清洗
 返回的 output 默认经过清洗：ANSI 控制序列、PTY 命令回显、bracketed-paste 标记、
@@ -167,6 +232,14 @@ ssh({ command: "pip install tensorflow", timeout: 120 })  # 等待最多 120 秒
 ssh({ action: "status" })
 ssh({ action: "disconnect" })
 
+### 通过 stdin 喂多行内容（exec 通道）
+ssh({ command: "python3 -", stdin: "import json\\nprint(json.dumps({'ok':1}))" })
+ssh({ command: "kubectl apply -f -", stdin: "<整段 yaml>" })
+ssh({ command: "psql -d mydb", stdin: "SELECT 1;\\nSELECT 2;" })
+
+### 仅想要干净 exec（拿 exitCode 不污染 PTY）
+ssh({ command: "make test", exec: true, timeout: 120 })
+
 ### 读取缓冲区
 ssh({ read: true })                    # 读取最近 20 行
 ssh({ read: true, lines: -1 })         # 读取全部
@@ -199,9 +272,9 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
 如输出超过 8000 字符，完整内容会保存到本地文件，仅返回尾部摘要 + 文件路径，可通过 Read/Grep 工具查看。`,
       inputSchema: {
         action: z
-          .enum(["list", "connect", "disconnect", "status", "notes", "sudo", "shortcuts"])
+          .enum(["list", "connect", "disconnect", "status", "notes", "sudo", "shortcuts", "reset_shell"])
           .optional()
-          .describe("连接管理操作"),
+          .describe("连接管理操作；reset_shell 关掉当前 PTY 重开一条（保留 SSH 连接）"),
         server: z.string().optional().describe("服务器名称（connect 时必填）"),
         content: z.string().optional().describe("备注内容（notes 写入时使用）"),
         command: z.string().optional().describe("要执行的命令"),
@@ -211,17 +284,19 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
         offset: z.number().optional().describe("读取起始偏移，默认 0"),
         clear: z.boolean().optional().describe("读取后清空缓冲区"),
         signal: z
-          .enum(["SIGINT", "SIGTSTP", "SIGQUIT"])
+          .enum(["SIGINT", "SIGTSTP", "SIGQUIT", "RESET"])
           .optional()
-          .describe("发送信号：SIGINT(Ctrl+C)/SIGTSTP(Ctrl+Z)/SIGQUIT"),
+          .describe("发送信号：SIGINT/SIGTSTP/SIGQUIT 单字符；RESET 是组合（Ctrl-C + Ctrl-U + 换行）专治续行 prompt 卡死"),
         shortcut: z.string().optional().describe("要执行的 shortcut 名称（运维预配置的命名命令）"),
         args: z.record(z.string()).optional().describe("shortcut 参数键值对，会被自动 shell-escape"),
         dryRun: z.boolean().optional().describe("仅用于 shortcut：渲染但不执行，secrets 显示为占位符"),
         interactive: z.boolean().optional().describe("启动 REPL（mysql/python/redis-cli）或向 REPL 内部输入子命令时设 true，跳过 sentinel 包装"),
         raw: z.boolean().optional().describe("仅用于 read：返回未清洗的原始 PTY 流（含 ANSI/控制序列），调试用"),
+        stdin: z.string().optional().describe("通过 stdin 喂给命令的字面量内容；提供时自动走 exec 通道（不经 PTY），适合多行 yaml/sql/python 等"),
+        exec: z.boolean().optional().describe("强制走 exec 通道（独立通道、不继承 PTY 状态、直接拿 exitCode）；与 stdin 任一为真即生效"),
       },
     },
-    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun, interactive, raw }): Promise<CallToolResult> => {
+    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun, interactive, raw, stdin, exec }): Promise<CallToolResult> => {
       try {
         // 1. 发送信号
         if (signal) {
@@ -234,12 +309,19 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
           }
 
           const shellManager = sshManager.getShellManager();
-          const success = shellManager.sendSignal(signal);
+          let success: boolean;
+          if (signal === "RESET") {
+            success = await shellManager.resetLine();
+          } else {
+            success = shellManager.sendSignal(signal);
+          }
 
           return {
             content: [{
               type: "text",
-              text: success ? `已发送 ${signal}` : `发送 ${signal} 失败`,
+              text: success
+                ? (signal === "RESET" ? "已发送复位序列（Ctrl-C + Ctrl-U + 换行）" : `已发送 ${signal}`)
+                : `发送 ${signal} 失败`,
             }],
             isError: !success,
           };
@@ -317,9 +399,9 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             };
           }
 
-          let rendered: string;
+          let split;
           try {
-            rendered = renderShortcut(shortcut, effective[shortcut], args ?? {});
+            split = renderShortcutSplit(shortcut, effective[shortcut], args ?? {});
           } catch (e) {
             return {
               content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
@@ -327,12 +409,40 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             };
           }
 
-          const shellManager = sshManager.getShellManager();
           const timeoutMs = timeout
             ? Math.min(Math.max(timeout, 5), 300) * 1000
             : undefined;
+
+          // shortcut 配置了 stdin 或调用方显式 exec=true：走 exec 通道（绕开 PTY）
+          if (split.stdin !== undefined || exec) {
+            try {
+              const execResult = await runExec(sshManager, split.command, split.stdin, timeoutMs);
+              return {
+                content: [{
+                  type: "text",
+                  text: shapeExecResult(
+                    {
+                      server: status.serverName,
+                      shortcut,
+                      args: args ?? {},
+                    },
+                    execResult
+                  ),
+                }],
+                isError: execResult.exitCode !== 0 && !execResult.timedOut,
+              };
+            } catch (e) {
+              return {
+                content: [{ type: "text", text: `exec 失败: ${e instanceof Error ? e.message : String(e)}` }],
+                isError: true,
+              };
+            }
+          }
+
+          // 默认路径：仍走 PTY shell（保留 cwd / env / interactive 行为）
+          const shellManager = sshManager.getShellManager();
           const result = await shellManager.send(
-            rendered,
+            split.command,
             timeoutMs ? { maxTimeout: timeoutMs } : undefined,
             { interactive: interactive ?? false }
           );
@@ -362,10 +472,33 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             };
           }
 
-          const shellManager = sshManager.getShellManager();
           const timeoutMs = timeout
             ? Math.min(Math.max(timeout, 5), 300) * 1000
             : undefined;
+
+          // 传了 stdin 或显式 exec=true：走独立 exec 通道，不污染 PTY shell
+          if (stdin !== undefined || exec) {
+            try {
+              const execResult = await runExec(sshManager, command, stdin, timeoutMs);
+              return {
+                content: [{
+                  type: "text",
+                  text: shapeExecResult(
+                    { server: status.serverName, command },
+                    execResult
+                  ),
+                }],
+                isError: execResult.exitCode !== 0 && !execResult.timedOut,
+              };
+            } catch (e) {
+              return {
+                content: [{ type: "text", text: `exec 失败: ${e instanceof Error ? e.message : String(e)}` }],
+                isError: true,
+              };
+            }
+          }
+
+          const shellManager = sshManager.getShellManager();
           const result = await shellManager.send(
             command,
             timeoutMs ? { maxTimeout: timeoutMs } : undefined,
@@ -481,6 +614,33 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
                 }, null, 2),
               }],
             };
+          }
+
+          case "reset_shell": {
+            const status = sshManager.getStatus();
+            if (!status.connected) {
+              return {
+                content: [{ type: "text", text: "未连接，无法重置 shell" }],
+                isError: true,
+              };
+            }
+            try {
+              await sshManager.resetShell();
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    message: "已重置 PTY shell（SSH 连接保留）",
+                    server: status.serverName,
+                  }, null, 2),
+                }],
+              };
+            } catch (e) {
+              return {
+                content: [{ type: "text", text: `reset_shell 失败: ${e instanceof Error ? e.message : String(e)}` }],
+                isError: true,
+              };
+            }
           }
 
           case "disconnect": {
@@ -671,30 +831,61 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
   server.registerTool(
     "sftp",
     {
-      description: `通过 SFTP 在本地和远程服务器之间传输文件。
+      description: `文件操作工具。可以在本机/远程之间传文件，也可以直接把内联文本写到任意一端。
 
-需要先通过 ssh 工具连接服务器后才能使用。SFTP 通道会在首次调用时自动创建。
+需要先通过 ssh 工具连接服务器后才能使用。SFTP 通道会在首次调用时自动创建（远端连接）。
 
 ## 操作
-- upload: 上传本地文件到远程服务器
-- download: 从远程服务器下载文件到本地
+- upload: 上传本地文件到远程（仅远程连接）
+- download: 从远程下载文件到本地（仅远程连接）
+- write:    把内联文本直接写到目标文件（local / 远程都支持）
+- read:     直接读出目标文件文本内容（local / 远程都支持）
+
+## 何时用 write 而不是 ssh.command
+**强烈推荐**任何"多行内容落盘"场景都用 sftp.write，不要用 ssh.command 拼 cat heredoc / echo / base64 decode：
+- write 不走 PTY，没有 bracketed-paste、续行 prompt、sentinel 包装这一堆问题
+- 任意换行/引号/反斜杠都能字面量保留，不用考虑转义层数
+- 典型场景：临时脚本、配置补丁、SQL 文件、Dockerfile、k8s yaml
 
 ## 使用示例
-sftp({ action: "upload", localPath: "/tmp/config.json", remotePath: "/home/user/config.json" })
+
+### 在 local（daemon 所在机器）写脚本
+sftp({ action: "write", path: "/tmp/run.sh", content: "#!/bin/bash\\nset -e\\n...", mode: 493 })   // 0o755 = 493
+
+### 写远端配置文件，父目录自动建
+sftp({ action: "write", path: "/etc/myapp/conf.d/x.toml", content: "...", mkdirs: true })
+
+### 读 local 文件
+sftp({ action: "read", path: "/var/log/app.log" })
+
+### 文件 → 文件 传输（旧 upload/download 接口仍保留）
+sftp({ action: "upload", localPath: "/tmp/big.tar.gz", remotePath: "/srv/big.tar.gz" })
 sftp({ action: "download", remotePath: "/var/log/app.log", localPath: "/tmp/app.log" })
 
+## 参数说明
+- path:     write/read 时使用，根据当前连接是 local 还是远程自动判断目标
+- content:  write 时必填，纯文本（utf-8）
+- mode:     write 时可选，权限位（十进制数，如 0o755 写成 493；默认 0o644 = 420）
+- mkdirs:   write 时可选，父目录不存在自动 mkdir -p
+- maxBytes: read 时可选，最大读取字节，超过会截断并标记 truncated（默认 1MB）
+
 ## 注意
-- 目录列表、文件删除、创建目录等操作请直接通过 ssh 工具执行 shell 命令
-- 本地连接（local）不支持 SFTP`,
+- 目录列表、文件删除、改权限等操作仍走 ssh 工具的 shell 命令
+- 上传时仍禁止 id_rsa / .pem / authorized_keys 等敏感文件名（防止误传密钥）`,
       inputSchema: {
         action: z
-          .enum(["upload", "download"])
-          .describe("传输操作：upload 上传 / download 下载"),
-        localPath: z.string().describe("本地文件路径"),
-        remotePath: z.string().describe("远程文件路径"),
+          .enum(["upload", "download", "write", "read"])
+          .describe("操作：upload/download 文件互传，write/read 内联文本读写"),
+        localPath: z.string().optional().describe("本地文件路径（upload/download 用）"),
+        remotePath: z.string().optional().describe("远端文件路径（upload/download 用）"),
+        path: z.string().optional().describe("目标路径（write/read 用，自动按当前连接判断 local/远端）"),
+        content: z.string().optional().describe("要写入的文本（write 必填）"),
+        mode: z.number().optional().describe("权限位十进制数（write 可选，默认 420 即 0o644；可执行用 493 = 0o755）"),
+        mkdirs: z.boolean().optional().describe("write 时父目录不存在自动建（默认 false）"),
+        maxBytes: z.number().optional().describe("read 时最大字节数（默认 1048576）"),
       },
     },
-    async ({ action, localPath, remotePath }): Promise<CallToolResult> => {
+    async ({ action, localPath, remotePath, path, content, mode, mkdirs, maxBytes }): Promise<CallToolResult> => {
       try {
         const status = sshManager.getStatus();
         if (!status.connected) {
@@ -704,34 +895,83 @@ sftp({ action: "download", remotePath: "/var/log/app.log", localPath: "/tmp/app.
           };
         }
 
-        if (sshManager.isLocal()) {
-          return {
-            content: [{ type: "text", text: "本地连接不支持 SFTP，请连接远程服务器后使用" }],
-            isError: true,
-          };
-        }
-
-        const client = sshManager.getClient();
-        if (!client) {
-          return {
-            content: [{ type: "text", text: "SSH Client 不可用" }],
-            isError: true,
-          };
-        }
-
         const sftpManager = sshManager.getSftpManager();
+        const isLocal = sshManager.isLocal();
 
-        if (action === "upload") {
-          const result = await sftpManager.upload(client, localPath, remotePath);
+        // upload / download：走传统 SFTP，仍只支持远端连接
+        if (action === "upload" || action === "download") {
+          if (isLocal) {
+            return {
+              content: [{ type: "text", text: "local 连接不支持 upload/download；同机文件操作请用 sftp({action:'write'/'read'}) 或 ssh.command(cp/mv)" }],
+              isError: true,
+            };
+          }
+          if (!localPath || !remotePath) {
+            return {
+              content: [{ type: "text", text: "upload/download 需要同时提供 localPath 和 remotePath" }],
+              isError: true,
+            };
+          }
+          const client = sshManager.getClient();
+          if (!client) {
+            return {
+              content: [{ type: "text", text: "SSH Client 不可用" }],
+              isError: true,
+            };
+          }
+          const result = action === "upload"
+            ? await sftpManager.upload(client, localPath, remotePath)
+            : await sftpManager.download(client, remotePath, localPath);
+          return { content: [{ type: "text", text: result }] };
+        }
+
+        // write / read：local 走 fs，远端走 SFTP
+        if (!path) {
           return {
-            content: [{ type: "text", text: result }],
-          };
-        } else {
-          const result = await sftpManager.download(client, remotePath, localPath);
-          return {
-            content: [{ type: "text", text: result }],
+            content: [{ type: "text", text: `${action} 需要提供 path 参数` }],
+            isError: true,
           };
         }
+
+        if (action === "write") {
+          if (content === undefined) {
+            return {
+              content: [{ type: "text", text: "write 需要提供 content 参数" }],
+              isError: true,
+            };
+          }
+          const writeResult = isLocal
+            ? await sftpManager.writeLocalFile(path, content, { mkdirs, mode })
+            : await sftpManager.writeRemote(sshManager.getClient()!, path, content, { mkdirs, mode });
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                action: "write",
+                target: isLocal ? "local" : status.serverName,
+                ...writeResult,
+              }, null, 2),
+            }],
+          };
+        }
+
+        // read
+        const readResult = isLocal
+          ? await sftpManager.readLocalFile(path, { maxBytes })
+          : await sftpManager.readRemote(sshManager.getClient()!, path, { maxBytes });
+        return {
+          content: [{
+            type: "text",
+            text: truncateIfLarge({
+              action: "read",
+              target: isLocal ? "local" : status.serverName,
+              path: readResult.path,
+              bytes: readResult.bytes,
+              truncated: readResult.truncated,
+              output: readResult.content,
+            }),
+          }],
+        };
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         return {

@@ -2,7 +2,9 @@
   "globalHints": [
     "VPS 和 mac 都注册了 SSH MCP — 跨机传文件优先用离源/目标最近的 MCP，不要经第三台机器中转",
     "部署类操作优先用预配置的 shortcut，不要手动拼命令",
-    "长任务（>5 分钟：构建/训练/批量导入/跑 chat 服务）不要硬等 timeout，起 tmux：tmux new -d -s <name> 'cmd > /tmp/<name>.log 2>&1'。看进度 tmux capture-pane -t <name> -p | tail -50；列表 tmux ls；中断 tmux send-keys -t <name> C-c；清理 tmux kill-session -t <name>。比 nohup+pid 稳，session 死了不留僵尸。"
+    "多行内容（脚本/yaml/sql/python）落盘一律用 sftp({action:'write', path, content})，不要 cat <<EOF / echo / base64 走 PTY；多行内容做 stdin 用 ssh({command, stdin})，会自动走 exec 通道",
+    "长任务（>5 分钟：构建/训练/批量导入/跑 chat 服务）不要硬等 timeout，起 tmux：tmux new -d -s <name> 'cmd > /tmp/<name>.log 2>&1'。看进度 tmux capture-pane -t <name> -p | tail -50；列表 tmux ls；中断 tmux send-keys -t <name> C-c；清理 tmux kill-session -t <name>。比 nohup+pid 稳，session 死了不留僵尸。",
+    "PTY 卡在 heredoc> / dquote> / cmdand 等续行 prompt 时先发 signal=RESET（Ctrl-C+Ctrl-U+换行），救不回来再 action=reset_shell（保留 SSH 连接重开 PTY），最后才考虑 disconnect+reconnect"
   ],
   "shortcuts": {
     "disk": {
@@ -15,7 +17,8 @@
     }
   },
   "localHints": [
-    "local 是 VPS 入口机本身，重活（构建/测试/起服务）尽量换到开发机 MCP 上跑"
+    "local 是 VPS 入口机本身，重活（构建/测试/起服务）尽量换到开发机 MCP 上跑",
+    "默认 shell 可能是 zsh（不是 bash）。不要假设有 ll / === / 之类常见 alias，也不要写依赖 bash-only 语法的脚本——多行脚本直接 sftp.write 到 .sh 再跑最稳"
   ],
   "localShortcuts": {
     "ports": {

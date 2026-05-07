@@ -114,20 +114,27 @@ function generateDelimiter(stdinContent: string): string {
 export type RenderMode = "execute" | "dryRun";
 
 /**
- * 渲染 shortcut。返回最终要送给 PTY 的字符串。
- *
- * - args 默认值：caller 未提供且声明了 default 的，自动用 default
- * - args enum 校验：最终值必须在 enum 范围内
- * - command 中的 args/secrets 自动 shell-escape
- * - 若有 stdin：用 quoted heredoc 拼到 command 末尾，stdin 内 args/secrets 不 escape
- * - mode='dryRun'：secrets 渲染为 <secret:NAME> 占位符，不会泄漏真实值
+ * 分离形式的渲染结果：command 和 stdin 各自字符串，由调用方决定怎么投递：
+ * - 老路径：拼成 heredoc 灌进 PTY
+ * - 新路径：command 走 exec 通道，stdin 直接喂给 channel
  */
-export function renderShortcut(
+export interface RenderedShortcut {
+  command: string;
+  stdin?: string;
+}
+
+/**
+ * 渲染 shortcut（分离形式，推荐）。
+ * - command 中的 args/secrets 会被 shell-escape（用单引号包裹）
+ * - stdin 中的 args/secrets 保持字面量（不 escape，因为不再走 shell 解析）
+ * - dryRun 模式：secrets 渲染为 <secret:NAME> 占位符
+ */
+export function renderShortcutSplit(
   shortcutName: string,
   cfg: ShortcutConfig,
   callerArgs: Record<string, string>,
   mode: RenderMode = "execute"
-): string {
+): RenderedShortcut {
   const declaredArgs = cfg.args ?? [];
   const declaredArgNames = new Set(declaredArgs.map((a) => a.name));
 
@@ -175,15 +182,26 @@ export function renderShortcut(
   const secrets = cfg.secrets ?? {};
   const dryRun = mode === "dryRun";
 
-  // 5. 渲染 command
-  const renderedCommand = renderTemplate(cfg.command, effectiveArgs, secrets, true, dryRun);
-
-  // 6. 若有 stdin，渲染并拼接 heredoc
+  const command = renderTemplate(cfg.command, effectiveArgs, secrets, true, dryRun);
   if (cfg.stdin === undefined) {
-    return renderedCommand;
+    return { command };
   }
+  const stdin = renderTemplate(cfg.stdin, effectiveArgs, secrets, false, dryRun);
+  return { command, stdin };
+}
 
-  const renderedStdin = renderTemplate(cfg.stdin, effectiveArgs, secrets, false, dryRun);
-  const delim = generateDelimiter(renderedStdin);
-  return `${renderedCommand} <<'${delim}'\n${renderedStdin}\n${delim}`;
+/**
+ * 兼容老接口：返回拼成 heredoc 的单字符串（dryRun 展示用 / 走 PTY 兜底用）。
+ * 新代码请用 renderShortcutSplit。
+ */
+export function renderShortcut(
+  shortcutName: string,
+  cfg: ShortcutConfig,
+  callerArgs: Record<string, string>,
+  mode: RenderMode = "execute"
+): string {
+  const { command, stdin } = renderShortcutSplit(shortcutName, cfg, callerArgs, mode);
+  if (stdin === undefined) return command;
+  const delim = generateDelimiter(stdin);
+  return `${command} <<'${delim}'\n${stdin}\n${delim}`;
 }

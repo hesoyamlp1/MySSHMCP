@@ -1,5 +1,6 @@
 import { Client, SFTPWrapper } from "ssh2";
-import { resolve } from "path";
+import { resolve, dirname, posix as pathPosix } from "path";
+import { promises as fsp } from "fs";
 import { homedir } from "os";
 
 // 禁止访问的本地敏感路径前缀
@@ -113,6 +114,134 @@ export class SFTPManager {
         resolve(`文件下载成功`);
       });
     });
+  }
+
+  /**
+   * 把内联文本写到远端文件（不走 PTY，绕开所有 heredoc / bracketed-paste 痛点）
+   * @param mkdirs 父目录不存在时自动建（mkdir -p 语义）
+   * @param mode  POSIX 权限位（八进制数，如 0o644）；默认 0o644
+   */
+  async writeRemote(
+    client: Client,
+    remotePath: string,
+    content: string,
+    options?: { mkdirs?: boolean; mode?: number }
+  ): Promise<{ path: string; bytes: number }> {
+    const sftp = await this.getSftp(client);
+    const mode = options?.mode ?? 0o644;
+    const buf = Buffer.from(content, "utf8");
+
+    if (options?.mkdirs) {
+      const parent = pathPosix.dirname(remotePath);
+      if (parent && parent !== "." && parent !== "/") {
+        await this.mkdirsRemote(sftp, parent);
+      }
+    }
+
+    await new Promise<void>((res, rej) => {
+      sftp.writeFile(remotePath, buf, { mode }, (err) => {
+        if (err) rej(new Error(`写入远端失败: ${err.message}`));
+        else res();
+      });
+    });
+    return { path: remotePath, bytes: buf.length };
+  }
+
+  /**
+   * 读取远端文件文本内容
+   */
+  async readRemote(
+    client: Client,
+    remotePath: string,
+    options?: { encoding?: BufferEncoding; maxBytes?: number }
+  ): Promise<{ path: string; bytes: number; content: string; truncated: boolean }> {
+    const sftp = await this.getSftp(client);
+    const encoding = options?.encoding ?? "utf8";
+    const maxBytes = options?.maxBytes ?? 1024 * 1024; // 默认 1MB 上限
+
+    const buf = await new Promise<Buffer>((res, rej) => {
+      sftp.readFile(remotePath, (err, data) => {
+        if (err) rej(new Error(`读取远端失败: ${err.message}`));
+        else res(data);
+      });
+    });
+
+    const truncated = buf.length > maxBytes;
+    const slice = truncated ? buf.subarray(0, maxBytes) : buf;
+    return {
+      path: remotePath,
+      bytes: buf.length,
+      content: slice.toString(encoding),
+      truncated,
+    };
+  }
+
+  /**
+   * 递归 mkdir（POSIX）。已存在不报错。
+   */
+  private async mkdirsRemote(sftp: SFTPWrapper, dir: string): Promise<void> {
+    const exists = await new Promise<boolean>((res) => {
+      sftp.stat(dir, (err) => res(!err));
+    });
+    if (exists) return;
+    const parent = pathPosix.dirname(dir);
+    if (parent && parent !== dir && parent !== "." && parent !== "/") {
+      await this.mkdirsRemote(sftp, parent);
+    }
+    await new Promise<void>((res, rej) => {
+      sftp.mkdir(dir, (err) => {
+        if (!err) {
+          res();
+          return;
+        }
+        // 失败兜底：再 stat 一次，已存在（race 或权限差异）就吞掉
+        sftp.stat(dir, (statErr) => {
+          if (!statErr) res();
+          else rej(new Error(`mkdir 失败 ${dir}: ${err.message}`));
+        });
+      });
+    });
+  }
+
+  /**
+   * 把内联文本写到本地（daemon 所在机器的）文件。不走 SFTP，直接 fs。
+   */
+  async writeLocalFile(
+    localPath: string,
+    content: string,
+    options?: { mkdirs?: boolean; mode?: number }
+  ): Promise<{ path: string; bytes: number }> {
+    const safePath = this.validateLocalPath(localPath, "upload");
+    const mode = options?.mode ?? 0o644;
+    const buf = Buffer.from(content, "utf8");
+
+    if (options?.mkdirs) {
+      await fsp.mkdir(dirname(safePath), { recursive: true });
+    }
+    await fsp.writeFile(safePath, buf, { mode });
+    return { path: safePath, bytes: buf.length };
+  }
+
+  /**
+   * 读取本地文件
+   */
+  async readLocalFile(
+    localPath: string,
+    options?: { encoding?: BufferEncoding; maxBytes?: number }
+  ): Promise<{ path: string; bytes: number; content: string; truncated: boolean }> {
+    const safePath = this.validateLocalPath(localPath, "download");
+    const encoding = options?.encoding ?? "utf8";
+    const maxBytes = options?.maxBytes ?? 1024 * 1024;
+
+    const buf = await fsp.readFile(safePath);
+    const truncated = buf.length > maxBytes;
+    const slice = truncated ? buf.subarray(0, maxBytes) : buf;
+    return {
+      path: safePath,
+      bytes: buf.length,
+      content: slice.toString(encoding),
+      truncated,
+    };
   }
 
   /**

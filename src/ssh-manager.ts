@@ -427,6 +427,28 @@ export class SSHManager {
     return this.isLocalConnection;
   }
 
+  /**
+   * 硬复位 PTY shell：保留 SSH client（不重连）/ 本地连接信息，只关掉当前 shell channel
+   * 重开一条干净的。比 disconnect+reconnect 快得多。
+   */
+  async resetShell(): Promise<void> {
+    if (!this.isConnected) {
+      throw new Error("未连接，无法重置 shell");
+    }
+    await this.shellManager.hardReset(async () => {
+      // 本地 pty 路径（无 client）：重新拉一个 node-pty
+      if (this.isLocalConnection && !this.client) {
+        await this.shellManager.openLocal();
+        return;
+      }
+      // 其他情况（远端 / 本地 ssh loopback）：在原 client 上重开 shell
+      if (!this.client) {
+        throw new Error("找不到 SSH client，无法重开 shell");
+      }
+      await this.shellManager.open(this.client);
+    });
+  }
+
   getStatus(): ConnectionStatus {
     return {
       connected: this.isConnected,
