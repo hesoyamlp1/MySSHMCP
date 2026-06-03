@@ -9,10 +9,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { SSHManager } from "./ssh-manager.js";
-import { ConfigManager } from "./config.js";
-import { NotesManager } from "./notes-manager.js";
-import { registerTools } from "./tools.js";
 import { runCLI } from "./cli.js";
+import { buildDirectServer } from "./server-factory.js";
+import { loadHubConfig } from "./hub-config.js";
+import { HubClientManager } from "./hub-client.js";
+import { buildHubServer } from "./hub.js";
 
 const PKG_VERSION: string = (() => {
   try {
@@ -72,17 +73,7 @@ function isCLIMode(): boolean {
  * 为避免跨请求的 SSHManager 状态互相污染，HTTP 调用方应自行约束"一个会话只用一个客户端"。
  */
 function buildServer(): { server: McpServer; sshManager: SSHManager } {
-  const server = new McpServer({
-    name: "ssh-mcp-server",
-    version: PKG_VERSION,
-  });
-
-  const sshManager = new SSHManager();
-  const configManager = new ConfigManager();
-  const notesManager = new NotesManager();
-
-  registerTools(server, sshManager, configManager, notesManager);
-  return { server, sshManager };
+  return buildDirectServer(PKG_VERSION);
 }
 
 /**
@@ -257,6 +248,33 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
 }
 
 /**
+ * 启动 hub 模式（stdio）：对 Claude 只露一个 ssh/sftp，内部按 node 路由到各 mac daemon。
+ */
+async function startHubServer(argv: string[]): Promise<void> {
+  const getArg = (name: string): string | undefined => {
+    const i = argv.indexOf(name);
+    if (i >= 0 && i + 1 < argv.length) return argv[i + 1];
+    return undefined;
+  };
+
+  const cfg = loadHubConfig(getArg("--hub-config"));
+  const mgr = new HubClientManager(cfg.nodes, PKG_VERSION);
+  const server = buildHubServer(mgr, PKG_VERSION);
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(
+    `[mcp-ssh-pty] hub mode: ${cfg.nodes.length} node(s): ${cfg.nodes.map((n) => n.name).join(", ")}`
+  );
+
+  const cleanup = async () => {
+    await mgr.closeAll().catch(() => {});
+    process.exit(0);
+  };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+}
+
+/**
  * 主函数
  */
 async function main(): Promise<void> {
@@ -265,7 +283,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  const httpOpts = parseHttpOptions(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+
+  if (argv.includes("--hub")) {
+    await startHubServer(argv);
+    return;
+  }
+
+  const httpOpts = parseHttpOptions(argv);
   if (httpOpts) {
     await startHttpServer(httpOpts);
   } else {

@@ -1,191 +1,186 @@
 ---
 name: deploy-ssh-mcp
-description: "Use this skill when deploying, reinstalling, or migrating the mcp-ssh-pty HTTP daemon on a mac (or swapping between multiple macs), or when onboarding a new mac as the ssh-mac MCP control plane for VPS-side Claude Code. Triggers: 'setup mcp-ssh-pty on mac', 'new mac for ssh-mac', 'switch mac', 'migrate mac mcp', 'mac mcp failed', 'ssh-mac connect local broken', 'VSCode grabbed port 27777', 'launchd mcp EADDRINUSE', or any request to make the VPS Claude Code reach back into a mac's internal network via the HTTP-transport MCP."
+description: "Use this skill when deploying / extending the multi-mac ssh-hub setup, or debugging it. Architecture: ONE `ssh-hub` MCP on the VPS (`mcp-ssh-pty --hub`, reads ~/.mori/ssh/hub.json) fans out to many nodes — the VPS itself (in-process) plus each mac running an `--http` daemon exposed over its reverse tunnel on a DISTINCT VPS port. Triggers: 'add a mac to ssh-hub / 加一台 mac', 'setup mcp-ssh-pty hub', 'new mac daemon', 'node online false / mac 连不上 / list 离线', 'two macs only one works / 反向隧道端口冲突', 'mac mcp daemon failed / EADDRINUSE 27777', 'connect local broken on mac', 'VSCode grabbed port 27777', 'switch / migrate mac', 'register ssh-hub'. Each mac node = the `--http` daemon deploy (launchd, token, sshd-loopback); the hub layer = hub.json + distinct ports + register ssh-hub."
 ---
 
-# Deploy ssh-mac MCP on a mac
+# Deploy: ssh-hub (one MCP) + per-mac `--http` daemons
 
-## Architecture recap
+## Architecture (hub model)
 
-Claude Code runs on VPS only. Mac is the control plane for home/office LAN.
+Claude Code runs on the VPS and registers **one** MCP: `ssh-hub` (`mcp-ssh-pty --hub`). It reads `~/.mori/ssh/hub.json` and routes to nodes. Each mac still runs its own `--http` daemon (closest to its LAN); the VPS joins as an in-process node.
 
 ```
-VPS (Claude Code)                           mac (daemon)
-  │                                          │
-  │ claude mcp add ssh-mac http://127:27777  │
-  │                                          │
-  │ HTTP POST /mcp ─────────┐                │
-  │                         ▼                ▼
-  │       VPS:127.0.0.1:27777 ◄─── reverse tunnel ──► mac:127.0.0.1:27777
-  │                                          │       (mcp-ssh-pty daemon)
-  │                                          │
-  │                                          ├─ ssh 127.0.0.1 (loopback, real PTY)
-  │                                          ├─ ssh 0.2 / 239 / ...  (LAN)
-  │                                          └─ ssh VIRCS (back to VPS)
+Claude Code (VPS)
+  └─ ssh-hub (stdio) = mcp-ssh-pty --hub  →  ~/.mori/ssh/hub.json
+       ├─ in-process 直连           → vps          (VPS 本机 shell)
+       ├─ http://127.0.0.1:27777/mcp → macbook      (--http daemon, 本地 27777)
+       └─ http://127.0.0.1:27778/mcp → mac-mini-1   (--http daemon, 本地 27777)
+
+mac daemon 本地都听 27777；反向隧道把它错开暴露到 VPS 不同端口：
+  macbook    ~/.ssh/config: RemoteForward 27777 localhost:27777
+  mac-mini-1 ~/.ssh/config: RemoteForward 27778 localhost:27777
 ```
 
-**Why this setup**: mac is closer to LAN targets than VPS; cross-LAN file transfer stays one hop; VPS keeps stdio `ssh` MCP only for project-scope debugging of this repo.
+**两层寻址**：hub 的 `node` 参数选哪台机器；现有的 `server` 参数选该机器内部哪台（local / 它的内网机）。
 
-## Critical constants
+**为什么**：一条注册管全部；每台 mac 仍是自己的 daemon 干活 → 一跳 sftp、本地直连、各自 notes/shortcuts；多台 mac 的 PTY 可同时活着（各自独立下游连接）；`list` 逐 node 探活显示 online。
 
-| | value | where |
-|---|---|---|
-| Port | `27777` | plist, ssh config, VPS mcp registration — all three must match |
-| Token | Same secret on both ends | `~/.mori/ssh/http-token` (mac) + `Authorization: Bearer <token>` (VPS mcp) |
-| VSCode port conflict | Handled in plist wrapper | plist auto-kills `Code Helper`/Electron when it grabs 27777 |
+## 端口纪律（核心，否则只能连一台）
 
-## Full deployment on a new mac
+VPS 上一个端口只能被一条反向隧道绑定。每台 mac 的 daemon **本地都用 27777**（plist/防抢逻辑不用每台改），错开的是**反向隧道暴露到 VPS 的端口**：
 
-Run `scripts/mac-deploy.sh` from this repo. It covers all steps below. Manual recipe:
+| 机器 | mac 本地 daemon | mac `~/.ssh/config`（Host vircs） | hub.json url |
+|---|---|---|---|
+| macbook | 27777 | `RemoteForward 27777 localhost:27777` | `http://127.0.0.1:27777/mcp` |
+| mac-mini-1 | 27777 | `RemoteForward 27778 localhost:27777` | `http://127.0.0.1:27778/mcp` |
+| mac-mini-2 | 27777 | `RemoteForward 27779 localhost:27777` | `http://127.0.0.1:27779/mcp` |
 
-### 1. Install runtime
+约定：VPS 暴露端口从 27777 顺延（27778、27779…）。两台都写 `27777 localhost:27777` → 第二台静默失败（mac 的 ssh 日志 `remote port forwarding failed for listen port 27777`）= 「只能连一台」的根因。
+
+## hub.json（VPS，含 token，chmod 600）
+
+`~/.mori/ssh/hub.json`（模板见仓库 `hub.example.json`）：
+
+```json
+{ "nodes": [
+  { "name": "vps", "local": true },
+  { "name": "macbook",    "url": "http://127.0.0.1:27777/mcp", "token": "<同该 mac MCP_HTTP_TOKEN>" },
+  { "name": "mac-mini-1", "url": "http://127.0.0.1:27778/mcp", "token": "<同该 mac MCP_HTTP_TOKEN>" }
+] }
+```
+
+- `local:true` 的节点是 VPS 自己（in-process，不用起 daemon）。
+- 远程节点的 `token` 必须与那台 mac daemon 的 `MCP_HTTP_TOKEN` 一致。
+
+## 注册 ssh-hub（VPS）
 
 ```bash
-npm i -g @mori-mori/mcp-ssh-pty   # needs ≥ 2.2.0
+claude mcp add ssh-hub -- mcp-ssh-pty --hub
+# 开发期指向源码：claude mcp add ssh-hub -- node /path/to/MySSHMCP/dist/index.js --hub
+claude mcp list | grep ssh-hub   # ✓ Connected
 ```
 
-Confirm version:
+> MCP 工具在会话启动时加载：注册后要**新开会话**才看得到 `ssh-hub__ssh` / `ssh-hub__sftp`。
+
+## 日常使用
+
+```
+ssh({action:"list"})                                  # 所有 node + online + 各 node 的 server 名
+ssh({action:"list", onlineOnly:true})                 # 只列在线 node
+ssh({node:"macbook", action:"connect", server:"local"})   # 连 macbook 本机；之后不带 node 都走它
+ssh({command:"..."})                                  # 在当前 node 当前连接上执行
+ssh({node:"mac-mini-1", action:"connect", server:"0.2"})  # 连 mac-mini-1 背后的内网机（该 mac 一跳）
+```
+
+切 node 不影响其它 node 上正在跑的东西（长任务照例丢 tmux）。connect 一个离线 node 会返回「daemon 可能不在线」而非裸 ECONNREFUSED。
+
+---
+
+# 单台 mac node 的部署（`--http` daemon）
+
+每个远程 node = 一台 mac 跑 `mcp-ssh-pty --http`。下面是单台 mac 的完整部署（加新 mac 就重复这套，**只改反向隧道端口**）。
+
+## 1. 安装运行时
 
 ```bash
+npm i -g @mori-mori/mcp-ssh-pty
 cat "$(npm root -g)/@mori-mori/mcp-ssh-pty/package.json" | grep version
 ```
 
-### 2. Token
+## 2. token
 
 ```bash
 mkdir -p ~/.mori/ssh
-echo '<YOUR_TOKEN_HERE>' > ~/.mori/ssh/http-token   # 与 VPS 侧 claude mcp add 的 Bearer 值保持一致
+echo '<TOKEN>' > ~/.mori/ssh/http-token   # 与 VPS hub.json 该 node 的 token 一致
 chmod 600 ~/.mori/ssh/http-token
 ```
 
-### 3. SSH loopback (required for `connect local`)
+## 3. SSH loopback（`connect local` 需要）
 
-mac's HTTP daemon runs under launchd → no TTY → node-pty fails. v2.2.0+ transparently falls back to ssh-to-self via sshd. Needs:
+mac 的 daemon 由 launchd 托管 → 无 TTY → node-pty 失败，会自动降级为 ssh 连自身 sshd（拿真 PTY）。需要：
 
 ```bash
-# a. mac sshd running (System Settings → General → Sharing → Remote Login: ON)
-# b. allowed users includes current user (same settings page)
-# c. self pub key in authorized_keys
-cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
+# a. Remote Login: ON（System Settings → General → Sharing），allowed users 含当前用户
+# b. 自己的 pub key 进 authorized_keys
+cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+ssh -o BatchMode=yes "$USER"@127.0.0.1 'echo ok'      # 验证
 
-# Verify:
-ssh -o BatchMode=yes $USER@127.0.0.1 'echo ok'
-
-# d. UTF-8 locale for ssh-loopback shell (sshd 不会从 daemon env 透传 LANG)
-#    plist 里设 LANG 只让 daemon 进程有；loopback 出来的子 shell 由 sshd 起，
-#    会丢掉 LANG → 中文命令回显花屏 + locale 显示 C。zshenv 里 export 一下兜底。
+# c. UTF-8 locale（sshd 不从 daemon env 透传 LANG，缺了中文回显花屏）
 grep -q '^export LANG=' ~/.zshenv 2>/dev/null || cat >> ~/.zshenv <<'EOF'
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 EOF
 ```
 
-### 4. SSH config on mac (reverse tunnel to VPS)
+## 4. 反向隧道（端口按上表错开！）
 
-Add under `Host vircs` block in `~/.ssh/config`:
+`~/.ssh/config` 的 `Host vircs` 块：
 
 ```
-RemoteForward 2222  localhost:22
-RemoteForward 27777 localhost:27777
+RemoteForward <VPS端口> localhost:27777     # macbook=27777 / mini1=27778 / mini2=27779
 ```
 
-(`9022` for company Git is unrelated but usually coexists.)
+起隧道：`ssh -fN vircs`（或让 VSCode Remote-SSH 维持）。
 
-### 5. ssh-servers.json (what mac daemon knows)
+## 5. ssh-servers.json（这台 mac 自己的内网拓扑）
 
-`~/.mori/ssh/ssh-servers.json` — must include a `VIRCS` entry for VPS, plus any LAN targets. Add `globalHints` at top explaining when to prefer this MCP.
+`~/.mori/ssh/ssh-servers.json` —— 这台 mac 能直连的内网机 + 它的 shortcuts/hints/notes。模板见 `ssh-servers.example.json`。
 
-### 6. launchd plist with auto-kill wrapper
+## 6. launchd plist（带 VSCode 抢端口的自动 kill）
 
-**Critical**: VSCode Remote-SSH grabs random high ports including 27777 on start. Naive plist → daemon loses race → EADDRINUSE. Fix: wrapper script checks `lsof -tiTCP:27777`, if owner is Code Helper / Electron → kill it → exec daemon.
+VSCode Remote-SSH 启动会随机抢高位端口（含 27777）→ daemon EADDRINUSE。plist 的 wrapper 检测 `lsof -tiTCP:27777`，是 Code Helper/Electron 就 kill 再 exec daemon。模板：`templates/com.mori.mcp-ssh-pty-http.plist.template`；自动化：`scripts/migrate-mac1.sh`（探测 nvm node 路径，每台不同）。
 
-Template lives at `templates/com.mori.mcp-ssh-pty-http.plist` in this repo. **Node path (`v24.13.0` vs `v22.18.0`) must match host's nvm install** — the script handles this.
-
-**locale**: plist 里 `EnvironmentVariables` 必须含 `LANG=en_US.UTF-8` + `LC_ALL=en_US.UTF-8`。launchd 默认 env 极简，缺了这两个会让 `connect local` 起的 zsh 把中文输出搞成 mojibake（命令本身能跑，只是回显花屏）。模板和 `migrate-mac1.sh` 已内置。
+- plist `EnvironmentVariables` 必须含 `LANG`/`LC_ALL=en_US.UTF-8`，否则 `connect local` 起的 zsh 中文 mojibake。
+- daemon 本地端口保持 27777（不用每台改）。
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.mori.mcp-ssh-pty-http.plist
-launchctl list | grep mcp-ssh   # pid non-zero + exit=0 = healthy
+launchctl list | grep mcp-ssh        # pid 非零 + exit=0 = 健康
 ```
 
-### 7. Bring up reverse tunnel
+## 7. per-mac drift checklist（换机/新机逐项过）
 
-Either `ssh -fN vircs` (explicit) or let VSCode Remote-SSH maintain the session. Verify from VPS:
-
-```bash
-ss -tlnp | grep :27777
-curl -sS http://127.0.0.1:27777/health
-```
-
-## 新机部署 / 换机时需要逐项确认（per-mac drift checklist）
-
-每台 mac 不一样的部分，按下面这张表逐条过：
-
-| 项 | 怎么取 / 怎么定 | 落到哪 |
+| 项 | 怎么取 | 落到哪 |
 |---|---|---|
-| Node 路径 | `which node`（nvm 路径每台不同：`v22.18.0` / `v24.13.0` 等） | plist `ProgramArguments` 里 `exec <NODE_DIR>/mcp-ssh-pty` |
-| 用户名 / `$HOME` | `id -un` / `$HOME` | plist `HOME`、`StandardOutPath`、`WorkingDirectory` |
-| SSH keypair | 这台 mac 自己的 `~/.ssh/id_ed25519`（**每台单独一把**，不要互相 copy） | (a) 本机 `~/.ssh/authorized_keys`（让 ssh-loopback 通）<br>(b) GitHub 账号 SSH keys（让 git pull 走 SSH） |
-| Token | 与 VPS 侧 `claude mcp add` 的 Bearer 一致，多台 mac 复用同一个 token 即可 | `~/.mori/ssh/http-token` 600 权限 |
-| `ssh-servers.json` | 内网拓扑可能不同（每台 mac 能直连的内网机不一样） | `~/.mori/ssh/ssh-servers.json`，记得带 `globalHints`（含 tmux 长任务那条） |
-| `tmux` 是否安装 | `command -v tmux`，没有就 `brew install tmux` | tmux hint 才有意义 |
-| LANG / LC_ALL | 固定 `en_US.UTF-8`（macOS 默认带，`zh_CN.UTF-8` 不一定有） | **两个地方都要写**：<br>(a) plist `EnvironmentVariables`（让 daemon 进程有）<br>(b) `~/.zshenv` 里 `export LANG/LC_ALL`（sshd 不会从 daemon env 透传到 ssh-loopback 子 shell） |
-| Reverse tunnel | mac 上 `~/.ssh/config` 的 `Host vircs` 块加 `RemoteForward 27777 localhost:27777` | 不带这条 VPS 侧 `ss -tlnp \| grep 27777` 就空 |
-| sshd 开启 | System Settings → General → Sharing → Remote Login: ON，allowed users 包含当前用户 | 关了的话 ssh-loopback / VPS→mac 的 ssh 都会 ECONNRESET |
+| Node 路径 | `which node`（nvm 每台不同） | plist `ProgramArguments` |
+| 用户名 / `$HOME` | `id -un` / `$HOME` | plist HOME/路径 |
+| SSH keypair（每台单独一把） | 这台的 `~/.ssh/id_ed25519` | (a) 本机 authorized_keys（loopback）(b) GitHub（git pull 走 SSH） |
+| Token | 与 VPS hub.json 该 node 一致 | `~/.mori/ssh/http-token` 600 |
+| **反向隧道端口** | **按端口表错开** | `~/.ssh/config` `RemoteForward <VPS端口> localhost:27777` |
+| LANG/LC_ALL | 固定 `en_US.UTF-8` | plist EnvironmentVariables + `~/.zshenv` |
+| sshd | Remote Login ON, 含当前用户 | 关了 loopback / VPS→mac 都 ECONNRESET |
 
-最稳的路径还是跑 `scripts/mac-deploy.sh` / `scripts/migrate-mac1.sh`，脚本会自动探测 node 路径 + 写好 plist。手工部署时拿这张表对一遍即可。
-
-## kickstart vs bootout（改了 plist 必须 bootout，否则 plist 改动不生效）
+## kickstart vs bootout
 
 ```bash
-# 改了 ssh-servers.json / 业务代码（npm i -g 之后）：进程重启即可
+# 改了 ssh-servers.json / 升级 npm 包：重启进程即可
 launchctl kickstart -k gui/$(id -u)/com.mori.mcp-ssh-pty-http
-
-# 改了 plist 本身（增删 EnvironmentVariables、ProgramArguments、KeepAlive 之类）：
-#   kickstart 只是杀进程让 launchd 重启它，plist 的缓存定义不变 → 改动看不到
-#   必须 bootout + bootstrap 让 launchd 重新读 plist
+# 改了 plist 本身（env/args/KeepAlive）：必须 bootout + bootstrap，否则缓存定义不刷新
 PLIST=~/Library/LaunchAgents/com.mori.mcp-ssh-pty-http.plist
-launchctl bootout gui/$(id -u) "$PLIST"
-launchctl bootstrap gui/$(id -u) "$PLIST"
+launchctl bootout gui/$(id -u) "$PLIST"; launchctl bootstrap gui/$(id -u) "$PLIST"
 ```
 
-判断方法：`launchctl print gui/$(id -u)/com.mori.mcp-ssh-pty-http | grep -A 10 environment` 看实际生效的 env，对不上 plist 文件就说明缓存没刷。
-
-## Swap macs (mac1 offline → mac2 online)
-
-Same port 27777 is used; only one mac binds reverse tunnel at a time. No VPS-side change needed.
-
-1. mac1 sleep/shutdown → VPS:127.0.0.1:27777 released
-2. mac2 boots → launchd auto-loads plist → daemon listening on mac2:27777
-3. mac2's ssh vircs re-establishes reverse tunnel (VSCode reconnect or `ssh -fN vircs`) → VPS:27777 → mac2:27777
-4. VPS Claude Code's `ssh-mac` MCP now transparently operates on mac2
-
-## Migrating old mac1 to v2.2.0 + auto-kill plist
-
-Copy `scripts/migrate-mac1.sh` to mac1 and run it. It:
-- Upgrades mcp-ssh-pty to latest
-- Adds self pub key to authorized_keys (for SSH loopback)
-- Rewrites plist with auto-kill wrapper (keeping mac1-specific node path)
-- Reloads launchd
-- Verifies daemon is listening
+---
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
+| 现象 | 原因 | 处理 |
 |---|---|---|
-| `ssh-mac: ✗ Failed to connect` | tunnel missing or daemon dead | `ss -tlnp \| grep 27777` on VPS; if empty → mac reconnect; if listening → check daemon on mac |
-| `EADDRINUSE 27777` in mcp-http.err | VSCode grabbed port before daemon | ensure plist wrapper is the auto-kill version; `launchctl kickstart -k gui/$(id -u)/com.mori.mcp-ssh-pty-http` |
-| `connect local` → `posix_spawnp failed` | pre-2.2.0 version, no loopback fallback | upgrade npm package |
-| `connect local` → ECONNRESET | sshd rejected loopback auth | add self pub key to authorized_keys; chmod 600 |
-| `connect mac` from VPS → ECONNRESET | mac sshd not running / user not allowed | System Settings → Sharing → Remote Login ON, allow your user |
-| hints in config not showing | ConfigManager caches on startup | `launchctl kickstart -k gui/$(id -u)/com.mori.mcp-ssh-pty-http` |
+| `list` 里某 node `online:false` | 反向隧道没起 / mac 睡了 / daemon 挂了 | VPS `ss -tlnp \| grep <VPS端口>`；空 → mac 重连 `ssh -fN vircs`；有监听 → 看 mac daemon |
+| 两台 mac 只连得上一台 | 反向端口撞了 | 每台错开（见端口表），重起隧道 |
+| `EADDRINUSE 27777` (mcp-http.err) | VSCode 抢了端口 | 用带 auto-kill 的 plist wrapper；`launchctl kickstart -k …` |
+| `connect local` → `posix_spawnp failed` | 旧版无 loopback 兜底 | 升级 npm 包 |
+| `connect local` → ECONNRESET | sshd 拒了 loopback 认证 | 自己 pub key 进 authorized_keys；chmod 600 |
+| hub `connect <node>` → ECONNREFUSED/fetch failed | 该 node daemon 不在线 | 同「online:false」一行 |
+| token 改了 hub 连不上 | hub.json token 与 mac MCP_HTTP_TOKEN 不一致 | 两边对齐 |
+| 中文输出花屏 | 缺 UTF-8 locale | plist EnvironmentVariables + `~/.zshenv` 都要有 |
 
-## When updating hints / server list
+## 换机 / 加机
 
-```bash
-# edit ~/.mori/ssh/ssh-servers.json
-launchctl kickstart -k gui/$(id -u)/com.mori.mcp-ssh-pty-http   # reload
-```
+- mac 下线：它的 `online` 自动变 `false`，hub 不用改；回来重连隧道即恢复。
+- 加新 mac：跑一遍「单台 mac node 部署」（端口表往下取一个），在 hub.json 加一条 node，`launchctl kickstart` 不需要（是新机），VPS 侧无需重启 ssh-hub（下次 list 即探到；已在跑的会话需新开才看到新 server 列表变化）。
+- 永久移除：删 hub.json 里那条 node + 那台 mac 的 RemoteForward 行 + 停它的 daemon。
 
-Note: this kills active MCP sessions — Claude Code HTTP client will reconnect automatically on next tool call, but the tool schema in any already-running session won't refresh until session restart.
+## 旧的单机直连（ssh-mac，HTTP 每台一注册）
+
+`claude mcp add --transport http ssh-mac http://127.0.0.1:27777/mcp --header "Authorization: Bearer <TOKEN>"` 仍可用作**单台 mac 的直连**（不经 hub）。多机统一管理用 hub；过渡期两者可共存（hub 复用同一个 daemon）。

@@ -1,0 +1,22 @@
+{
+  "//": "hub 模式配置：放在 VPS 的 ~/.mori/ssh/hub.json（含 token，建议 chmod 600）。用 `mcp-ssh-pty --hub` 读取。",
+  "nodes": [
+    {
+      "//": "VPS 自己：in-process 直连，不用额外起 daemon",
+      "name": "vps",
+      "local": true
+    },
+    {
+      "//": "一台 mac：它跑 `--http` daemon（本地 27777），反向隧道把它暴露到 VPS 的 27777",
+      "name": "macbook",
+      "url": "http://127.0.0.1:27777/mcp",
+      "token": "和该 mac MCP_HTTP_TOKEN 一致的字符串"
+    },
+    {
+      "//": "再来一台 mac mini：daemon 本地仍 27777，反向隧道错开暴露到 VPS 的 27778",
+      "name": "mac-mini-1",
+      "url": "http://127.0.0.1:27778/mcp",
+      "token": "和该 mac MCP_HTTP_TOKEN 一致的字符串"
+    }
+  ]
+}

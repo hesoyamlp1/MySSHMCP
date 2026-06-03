@@ -4,8 +4,10 @@ import { z } from "zod";
 import { SSHManager, LOCAL_SERVER } from "./ssh-manager.js";
 import { ConfigManager } from "./config.js";
 import { NotesManager } from "./notes-manager.js";
-import { ShortcutConfig } from "./types.js";
+import { ShortcutConfig, ServerConfig } from "./types.js";
 import { saveIfLarge } from "./output-store.js";
+import { probeTcp } from "./net-probe.js";
+import { SSH_INPUT_SHAPE, SFTP_INPUT_SHAPE } from "./tool-schemas.js";
 import { renderShortcut, renderShortcutSplit } from "./shortcut-renderer.js";
 import { execLocal, execRemote, ExecResult } from "./exec-runner.js";
 
@@ -125,7 +127,7 @@ export function registerTools(
       description: `SSH 远程服务器连接管理和 PTY Shell 交互。
 
 ## 连接管理 (action)
-- list: 列出所有可用服务器（附带备注摘要，附带全局 hints）
+- list: 列出所有可用服务器（每条带 online 端口探活 + 备注摘要 + 全局 hints）；传 onlineOnly=true 只列当前在线（反向隧道已连）的机器
 - connect: 连接服务器（需提供 server 参数，自动附带完整备注 + 全局 hints + 该服务器 hints）
 - disconnect: 断开当前连接
 - status: 查看连接状态和 shell 缓冲区行数
@@ -270,33 +272,9 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
 
 ## 输出过长处理
 如输出超过 8000 字符，完整内容会保存到本地文件，仅返回尾部摘要 + 文件路径，可通过 Read/Grep 工具查看。`,
-      inputSchema: {
-        action: z
-          .enum(["list", "connect", "disconnect", "status", "notes", "sudo", "shortcuts", "reset_shell"])
-          .optional()
-          .describe("连接管理操作；reset_shell 关掉当前 PTY 重开一条（保留 SSH 连接）"),
-        server: z.string().optional().describe("服务器名称（connect 时必填）"),
-        content: z.string().optional().describe("备注内容（notes 写入时使用）"),
-        command: z.string().optional().describe("要执行的命令"),
-        timeout: z.number().optional().describe("命令最大等待时间（秒），默认 5，最大 300。对于 pip install、apt upgrade 等长时间命令建议设置较大值"),
-        read: z.boolean().optional().describe("读取缓冲区"),
-        lines: z.number().optional().describe("读取行数，默认 20，-1 返回全部"),
-        offset: z.number().optional().describe("读取起始偏移，默认 0"),
-        clear: z.boolean().optional().describe("读取后清空缓冲区"),
-        signal: z
-          .enum(["SIGINT", "SIGTSTP", "SIGQUIT", "RESET"])
-          .optional()
-          .describe("发送信号：SIGINT/SIGTSTP/SIGQUIT 单字符；RESET 是组合（Ctrl-C + Ctrl-U + 换行）专治续行 prompt 卡死"),
-        shortcut: z.string().optional().describe("要执行的 shortcut 名称（运维预配置的命名命令）"),
-        args: z.record(z.string()).optional().describe("shortcut 参数键值对，会被自动 shell-escape"),
-        dryRun: z.boolean().optional().describe("仅用于 shortcut：渲染但不执行，secrets 显示为占位符"),
-        interactive: z.boolean().optional().describe("启动 REPL（mysql/python/redis-cli）或向 REPL 内部输入子命令时设 true，跳过 sentinel 包装"),
-        raw: z.boolean().optional().describe("仅用于 read：返回未清洗的原始 PTY 流（含 ANSI/控制序列），调试用"),
-        stdin: z.string().optional().describe("通过 stdin 喂给命令的字面量内容；提供时自动走 exec 通道（不经 PTY），适合多行 yaml/sql/python 等"),
-        exec: z.boolean().optional().describe("强制走 exec 通道（独立通道、不继承 PTY 状态、直接拿 exitCode）；与 stdin 任一为真即生效"),
-      },
+      inputSchema: SSH_INPUT_SHAPE,
     },
-    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun, interactive, raw, stdin, exec }): Promise<CallToolResult> => {
+    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun, interactive, raw, stdin, exec, onlineOnly }): Promise<CallToolResult> => {
       try {
         // 1. 发送信号
         if (signal) {
@@ -526,16 +504,29 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             const servers = configManager.listServers();
             const status = sshManager.getStatus();
 
+            // 端口探活：判断每台机器当前是否可达（≈ 反向隧道是否在线）。
+            // - 直连 / 隧道暴露（127.0.0.1:220x）：直接探 host:port
+            // - proxyJump：探跳板机端口（跳板通了链路才可能通）
+            // - proxy(SOCKS)：无法直接探，online 留 undefined（未知，不误判离线）
+            const probeServer = (s: ServerConfig): Promise<boolean | undefined> => {
+              if (s.proxy) return Promise.resolve(undefined);
+              if (s.proxyJump) return probeTcp(s.proxyJump.host, s.proxyJump.port ?? 22);
+              return probeTcp(s.host, s.port || 22);
+            };
+            const onlineFlags = await Promise.all(servers.map(probeServer));
+
             const list = [
               {
                 name: LOCAL_SERVER.name,
+                online: true, // local 就是 MCP 自身所在机器，永远在线
                 connected: status.serverName === LOCAL_SERVER.name,
                 type: "built-in",
                 notes: notesManager.readSummary(LOCAL_SERVER.name),
                 shortcuts: summarizeShortcuts(configManager.getEffectiveShortcuts("local"), "names"),
               },
-              ...servers.map((s) => ({
+              ...servers.map((s, i) => ({
                 name: s.name,
+                online: onlineFlags[i],
                 connected: status.serverName === s.name,
                 type: "configured",
                 notes: notesManager.readSummary(s.name),
@@ -543,8 +534,11 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
               })),
             ];
 
+            // onlineOnly：滤掉明确离线的（online===false）；未知（undefined）保留
+            const visible = onlineOnly ? list.filter((e) => e.online !== false) : list;
+
             const hints = configManager.getGlobalHints();
-            const payload: Record<string, unknown> = { servers: list };
+            const payload: Record<string, unknown> = { servers: visible };
             if (hints) payload.hints = hints;
 
             return {
@@ -594,7 +588,21 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
               };
             }
 
-            await sshManager.connect(serverConfig);
+            try {
+              await sshManager.connect(serverConfig);
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              const offlineish = /ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ECONNRESET/i.test(msg);
+              return {
+                content: [{
+                  type: "text",
+                  text: offlineish
+                    ? `无法连接 '${serverName}'：${msg}\n该机器可能不在线（反向隧道未连）。用 ssh({ action: "list" }) 看 online 状态。`
+                    : `连接 '${serverName}' 失败：${msg}`,
+                }],
+                isError: true,
+              };
+            }
 
             const notes = notesManager.read(serverName);
             const globalHints = configManager.getGlobalHints();
@@ -872,18 +880,7 @@ sftp({ action: "download", remotePath: "/var/log/app.log", localPath: "/tmp/app.
 ## 注意
 - 目录列表、文件删除、改权限等操作仍走 ssh 工具的 shell 命令
 - 上传时仍禁止 id_rsa / .pem / authorized_keys 等敏感文件名（防止误传密钥）`,
-      inputSchema: {
-        action: z
-          .enum(["upload", "download", "write", "read"])
-          .describe("操作：upload/download 文件互传，write/read 内联文本读写"),
-        localPath: z.string().optional().describe("本地文件路径（upload/download 用）"),
-        remotePath: z.string().optional().describe("远端文件路径（upload/download 用）"),
-        path: z.string().optional().describe("目标路径（write/read 用，自动按当前连接判断 local/远端）"),
-        content: z.string().optional().describe("要写入的文本（write 必填）"),
-        mode: z.number().optional().describe("权限位十进制数（write 可选，默认 420 即 0o644；可执行用 493 = 0o755）"),
-        mkdirs: z.boolean().optional().describe("write 时父目录不存在自动建（默认 false）"),
-        maxBytes: z.number().optional().describe("read 时最大字节数（默认 1048576）"),
-      },
+      inputSchema: SFTP_INPUT_SHAPE,
     },
     async ({ action, localPath, remotePath, path, content, mode, mkdirs, maxBytes }): Promise<CallToolResult> => {
       try {

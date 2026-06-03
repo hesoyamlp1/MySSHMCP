@@ -37,31 +37,48 @@ claude mcp add --transport http ssh-remote http://127.0.0.1:7777/mcp \
   --header "Authorization: Bearer <shared-secret>"
 ```
 
-## 架构：跨机 MCP（VPS + mac 场景）
+## 架构：多机统一管理（hub 模式）
 
-典型场景：Claude Code 只跑在 VPS 上，但大部分运维目标在 mac 及其内网机（0.2/...）。
-希望 "VPS 的 Claude Code 可以直接调 mac 的 MCP" 来避免 261M jar 经 VPS 中转之类的拓扑浪费。
+典型场景：Claude Code 只跑在 VPS 上，要同时管理 VPS 自己 + 多台 mac（及各自内网机），而且只想注册**一个** MCP。
 
-方案：**mac 上把 MCP 以 HTTP daemon 跑，通过已有反向 SSH 隧道暴露给 VPS**。
+方案：**hub 模式**。同一个二进制有两种角色：
+
+- **直连模式**（默认 / `--http`）：直接做 SSH/PTY 的活。每台 mac 上各跑一个 `--http` daemon，经反向隧道暴露到 VPS。
+- **hub 模式**（`--hub`）：跑在 VPS，对 Claude 只露一个 `ssh`/`sftp`，内部按 `node` 路由到各 mac 的 daemon（自己既是 MCP server 又是各 daemon 的 client）。VPS 自己作为一个 in-process node 直接进 hub，不用额外起 daemon。
 
 ```
-mac (NAT 后)
-  ├─ mcp-ssh-pty --http --port 7777 --host 127.0.0.1 --token XYZ
-  └─ ssh -R 2222:localhost:22 -R 7777:localhost:7777 vps   # 多加一个 -R 端口
-
-vps
-  └─ claude mcp add --transport http ssh-mac http://127.0.0.1:7777/mcp \
-         --header "Authorization: Bearer XYZ"
+Claude Code (VPS)
+  └─ 一条注册：ssh-hub (stdio) → mcp-ssh-pty --hub  → 读 ~/.mori/ssh/hub.json
+       ├─ in-process 直连 → vps（VPS 本机 shell）
+       ├─ http://127.0.0.1:27777 → macbook daemon (--http)        ┐ 各 mac daemon 本地仍 27777，
+       └─ http://127.0.0.1:27778 → mac-mini-1 daemon (--http)     ┘ 反向隧道错开暴露到 VPS 不同端口
+     ssh({action:"list"}) → 逐 node 探活 online；connect node=macbook → 路由到该 daemon
 ```
 
-VPS 同时保留本地 stdio MCP（`ssh-vps`）兜底，这样 mac 宕机不影响 VPS 自身操作。
-mac 的 ssh-servers.json 里可加一条 `vps` 条目，让 mac MCP 也能 sftp mac↔vps 双向传输。
+- 一条注册管全部；每台 mac 仍是自己的 daemon 在干活 → 保留**一跳 sftp**、本地直连、各自 notes/shortcuts。
+- 每个 node 是独立下游连接 → 多台 mac 的 PTY 可**同时活着**，hub 只负责路由。
 
-### 建议安全实践
+hub 配置 `~/.mori/ssh/hub.json`（见 `hub.example.json`）：
 
-- mac HTTP 模式**必须**设置 `--token`，并只绑 `127.0.0.1`（由反向隧道暴露到 VPS 的 loopback）
-- 不要 `--host 0.0.0.0` 直接暴露到局域网/公网
-- token 可写入 mac launchd plist 或 systemd EnvironmentFile 中
+```json
+{ "nodes": [
+  { "name": "vps", "local": true },
+  { "name": "macbook",    "url": "http://127.0.0.1:27777/mcp", "token": "..." },
+  { "name": "mac-mini-1", "url": "http://127.0.0.1:27778/mcp", "token": "..." }
+] }
+```
+
+注册 + 用法：
+
+```bash
+claude mcp add ssh-hub -- mcp-ssh-pty --hub
+# ssh({action:"list"})                              # 所有 node + online + 各 node 的 server
+# ssh({node:"macbook", action:"connect", server:"local"})   # 连 macbook 本机
+# ssh({command:"..."})                              # 在当前 node 当前连接上执行
+```
+
+> 完整部署、端口纪律（每台 mac daemon 反向隧道**错开**到不同 VPS 端口）、单台 mac daemon 的部署、排错见 `skills/deploy-ssh-mcp/SKILL.md`。
+> `ssh-mac` 那种「每台 mac 一条 HTTP 注册」仍可用作单机直连，但多机统一管理推荐 hub。
 
 ## CLI Commands
 
