@@ -511,7 +511,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             const probeServer = (s: ServerConfig): Promise<boolean | undefined> => {
               if (s.proxy) return Promise.resolve(undefined);
               if (s.proxyJump) return probeTcp(s.proxyJump.host, s.proxyJump.port ?? 22);
-              return probeTcp(s.host, s.port || 22);
+              return probeTcp(s.host, s.port ?? 22);
             };
             const onlineFlags = await Promise.all(servers.map(probeServer));
 

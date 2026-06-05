@@ -61,9 +61,10 @@ export function buildHubServer(mgr: HubClientManager, version: string): McpServe
           current: n.name === state.currentNode,
         };
         if (online) {
-          // best-effort：拉该 node 自己的 server 列表（local + 它的内网机）
+          // best-effort：拉该 node 自己的 server 列表（local + 它的内网机）。
+          // 短超时：端口在 listen 但 daemon 半死时，list 整体也别被一个 node 拖住。
           try {
-            const r = await mgr.callTool(n.name, "ssh", { action: "list" });
+            const r = await mgr.callTool(n.name, "ssh", { action: "list" }, { timeoutMs: 5000 });
             const txt = firstText(r);
             if (txt) {
               const parsed = JSON.parse(txt);
@@ -142,7 +143,10 @@ export function buildHubServer(mgr: HubClientManager, version: string): McpServe
       description: `多机 hub 的文件操作：转发到当前（或 node 指定）的 mac daemon 的 sftp。
 语义与单机 sftp 完全一致（upload/download/write/read）；文件在该 mac 与它的目标之间直接传，不经 VPS 中转。`,
       inputSchema: {
-        node: z.string().optional().describe("目标 mac node 名；不传用当前 node"),
+        node: z
+          .string()
+          .optional()
+          .describe("目标 mac node 名；不传用当前 node。传了会把当前 node 切到它（影响之后不带 node 的 ssh/sftp）"),
         ...SFTP_INPUT_SHAPE,
       },
     },

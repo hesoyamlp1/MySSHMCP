@@ -11,6 +11,42 @@ interface Conn {
   closeExtra?: () => Promise<void>;
 }
 
+/** 远程节点 MCP 握手超时：mac 半死（端口在 listen 但 daemon 无响应）时别卡满 60s */
+const CONNECT_TIMEOUT_MS = 6000;
+/** 没带命令 timeout 的普通调用沿用 SDK 默认 60s */
+const DEFAULT_CALL_TIMEOUT_MS = 60000;
+
+/** 给一个 promise 套超时；超时 reject，不取消底层操作（底层会被随后的 drop 清掉） */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label}超时（${ms}ms）`)), ms);
+    if (typeof t.unref === "function") t.unref(); // 别因为这个 timer 拖住进程退出
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
+/**
+ * 转发的命令可能跑很久（pip / apt / build），daemon 端有自己的 timeout 参数。
+ * client 请求超时必须 ≥ 命令 timeout，否则会被 SDK 默认 60s 砍掉、还可能触发重试重复执行。
+ */
+function callTimeoutFor(args: Record<string, unknown>): number {
+  const t = typeof args.timeout === "number" ? args.timeout : undefined;
+  if (t && t > 0) return (t + 30) * 1000; // 命令最长等待 + 30s 缓冲
+  return DEFAULT_CALL_TIMEOUT_MS;
+}
+
+/**
+ * 是否「连接层」失效（可安全重连重发）。
+ * 命令执行中的超时 / 业务错误不算——那种重发可能让有副作用的命令跑两遍。
+ */
+function isConnectionError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /not connected|connection closed|terminated|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|fetch failed|transport/i.test(msg);
+}
+
 /**
  * 管理 hub → 各下游节点的 MCP 连接。
  * - 远程节点：StreamableHTTP client 连到 mac daemon（带 Bearer）
@@ -55,7 +91,12 @@ export class HubClientManager {
         ? { headers: { Authorization: `Bearer ${node.token}` } }
         : undefined,
     });
-    await client.connect(transport);
+    try {
+      await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `连接 node '${node.name}'`);
+    } catch (e) {
+      await client.close().catch(() => {}); // 半连接别泄漏
+      throw e;
+    }
     const conn: Conn = { client };
     this.conns.set(node.name, conn);
     return conn;
@@ -79,21 +120,36 @@ export class HubClientManager {
   }
 
   /**
-   * 调用某 node 上的工具（ssh / sftp）。失败重连一次。
+   * 调用某 node 上的工具（ssh / sftp）。
+   * - timeoutMs：client 请求超时；不传则按转发命令的 timeout 参数放大（长命令不被默认 60s 误杀）
+   * - 建连阶段失败 → drop 重连一次（命令还没发出，安全）
+   * - 命令已发出后失败：只有「连接断了」才重连重发；超时 / 业务错误直接抛，避免命令重复执行
    */
-  async callTool(name: string, toolName: string, args: Record<string, unknown>): Promise<CallToolResult> {
+  async callTool(
+    name: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    opts?: { timeoutMs?: number }
+  ): Promise<CallToolResult> {
+    const timeout = opts?.timeoutMs ?? callTimeoutFor(args);
+
+    let conn: Conn;
     try {
-      const conn = await this.getConn(name);
-      return (await conn.client.callTool({ name: toolName, arguments: args })) as CallToolResult;
-    } catch (firstErr) {
-      // 缓存连接可能已失效：丢弃后重连一次
+      conn = await this.getConn(name);
+    } catch {
+      // 缓存可能是 stale 的：丢弃后重连一次（仍失败就抛）
       this.drop(name);
-      try {
-        const conn = await this.getConn(name);
-        return (await conn.client.callTool({ name: toolName, arguments: args })) as CallToolResult;
-      } catch {
-        throw firstErr; // 抛原始错误，更能反映根因
-      }
+      conn = await this.getConn(name);
+    }
+
+    try {
+      return (await conn.client.callTool({ name: toolName, arguments: args }, undefined, { timeout })) as CallToolResult;
+    } catch (callErr) {
+      if (!isConnectionError(callErr)) throw callErr;
+      // 连接在请求途中断了：重连重发一次
+      this.drop(name);
+      const conn2 = await this.getConn(name);
+      return (await conn2.client.callTool({ name: toolName, arguments: args }, undefined, { timeout })) as CallToolResult;
     }
   }
 
