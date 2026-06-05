@@ -60,6 +60,7 @@ export function buildHubServer(mgr: HubClientManager, version: string): McpServe
           online,
           current: n.name === state.currentNode,
         };
+        if (n.note) entry.note = n.note; // hub.json 里的简短标注，离线也显示
         if (online) {
           // best-effort：拉该 node 自己的 server 列表（local + 它的内网机）。
           // 短超时：端口在 listen 但 daemon 半死时，list 整体也别被一个 node 拖住。

@@ -12,6 +12,7 @@ export interface HubNode {
   url?: string;        // http://127.0.0.1:27777/mcp（远程节点必填）
   token?: string;      // 该 daemon 的 Bearer token（与 MCP_HTTP_TOKEN 一致）
   local?: boolean;     // true=本机 in-process 直连（VPS 自己），此时不需要 url
+  note?: string;       // 节点简短标注，list 总览直接显示（离线也可见）；详细运维备注走该 mac 的 local note
 }
 
 export interface HubConfig {

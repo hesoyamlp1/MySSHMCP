@@ -1,22 +1,26 @@
 {
   "//": "hub 模式配置：放在 VPS 的 ~/.mori/ssh/hub.json（含 token，建议 chmod 600）。用 `mcp-ssh-pty --hub` 读取。",
+  "//note": "note 字段是节点的简短标注，会出现在 ssh({action:\"list\"}) 总览里（离线也显示）；每台 mac 的详细运维备注另外走该 mac 的 local note。",
   "nodes": [
     {
       "//": "VPS 自己：in-process 直连，不用额外起 daemon",
       "name": "vps",
-      "local": true
+      "local": true,
+      "note": "VPS 入口节点：git / 读日志 / 轻量脚本，内网机要走某台 mac"
     },
     {
-      "//": "一台 mac：它跑 `--http` daemon（本地 27777），反向隧道把它暴露到 VPS 的 27777",
-      "name": "macbook",
-      "url": "http://127.0.0.1:27777/mcp",
-      "token": "和该 mac MCP_HTTP_TOKEN 一致的字符串"
-    },
-    {
-      "//": "再来一台 mac mini：daemon 本地仍 27777，反向隧道错开暴露到 VPS 的 27778",
-      "name": "mac-mini-1",
+      "//": "一台 mac：它跑 `--http` daemon（本地 27777），反向隧道错开暴露到 VPS 的 27778",
+      "name": "macbook-air",
       "url": "http://127.0.0.1:27778/mcp",
-      "token": "和该 mac MCP_HTTP_TOKEN 一致的字符串"
+      "token": "和该 mac MCP_HTTP_TOKEN 一致的字符串",
+      "note": "主力开发机，内网核心；合盖会睡 → online 变 false"
+    },
+    {
+      "//": "再来一台 mac mini：daemon 本地仍 27777，反向隧道再错开到 VPS 的 27779",
+      "name": "mac-mini-1",
+      "url": "http://127.0.0.1:27779/mcp",
+      "token": "和该 mac MCP_HTTP_TOKEN 一致的字符串",
+      "note": "常驻不休眠，跑长任务 / 内网服务"
     }
   ]
 }
