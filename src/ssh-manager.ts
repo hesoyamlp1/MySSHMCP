@@ -272,6 +272,7 @@ export class SSHManager {
       });
 
       jumpClient.on("error", (err) => {
+        try { jumpClient.end(); } catch { /* ignore */ }
         reject(new Error(`跳板机连接失败: ${err.message}`));
       });
 
@@ -404,6 +405,10 @@ export class SSHManager {
 
   private cleanup(): void {
     this.sftpManager.close();
+    // 收尸：error/close 回调走的是 cleanup 而非 disconnect，必须在这里也关掉底层连接，
+    // 否则 ProxyJump 的 jumpClient 被丢引用却不 end，TCP 会残留到 keepalive 超时。
+    if (this.client) { try { this.client.end(); } catch { /* ignore */ } }
+    if (this.jumpClient) { try { this.jumpClient.end(); } catch { /* ignore */ } }
     this.isConnected = false;
     this.isLocalConnection = false;
     this.currentServer = null;

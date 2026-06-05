@@ -96,6 +96,7 @@ interface Session {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
   sshManager: SSHManager;
+  lastActivity: number; // 用于 idle 回收：非优雅断开时 onclose 不触发，靠这个扫掉僵尸 session
 }
 
 function isInitializeRequest(body: unknown): boolean {
@@ -191,7 +192,7 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid: string) => {
-            const sess: Session = { transport, server, sshManager };
+            const sess: Session = { transport, server, sshManager, lastActivity: Date.now() };
             sessions.set(sid, sess);
             console.error(`[mcp-ssh-pty] session opened: ${sid} (active=${sessions.size})`);
           },
@@ -205,7 +206,7 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
           }
         };
         await server.connect(transport);
-        session = { transport, server, sshManager };
+        session = { transport, server, sshManager, lastActivity: Date.now() };
       } else {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -215,6 +216,7 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
         return;
       }
 
+      session!.lastActivity = Date.now();
       await session!.transport.handleRequest(req, res, parsedBody);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -234,8 +236,24 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
     console.error(`[mcp-ssh-pty] HTTP listening on http://${opts.host}:${opts.port}/mcp${authNote}`);
   });
 
+  // 回收 idle session：客户端非优雅断开（Claude 重启 / 反向隧道断）时 transport.onclose
+  // 不触发，session 会连同它的 SSHManager 泄漏。定期扫描，关掉久无活动的。
+  const SESSION_IDLE_MS = 30 * 60 * 1000;  // 30 分钟无请求即视为僵尸
+  const SESSION_SWEEP_MS = 5 * 60 * 1000;  // 每 5 分钟扫一次
+  const sweepTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [sid, sess] of sessions) {
+      if (now - sess.lastActivity > SESSION_IDLE_MS) {
+        console.error(`[mcp-ssh-pty] reaping idle session ${sid} (idle ${Math.round((now - sess.lastActivity) / 1000)}s, active=${sessions.size})`);
+        sess.transport.close().catch(() => {}); // 触发 onclose → sessions.delete + sshManager.disconnect
+      }
+    }
+  }, SESSION_SWEEP_MS);
+  sweepTimer.unref(); // 别因为这个 timer 拖住进程退出
+
   const cleanup = async () => {
-    httpServer.close();
+    clearInterval(sweepTimer);
+    await new Promise<void>((r) => httpServer.close(() => r()));
     for (const sess of sessions.values()) {
       await sess.transport.close().catch(() => {});
       await sess.sshManager.disconnect().catch(() => {});

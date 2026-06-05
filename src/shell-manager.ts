@@ -1,5 +1,4 @@
 import { Client, ClientChannel } from "ssh2";
-import { spawn, ChildProcess } from "child_process";
 import { randomBytes } from "crypto";
 import * as pty from "node-pty";
 import { ShellResult, ShellConfig } from "./types.js";
@@ -30,8 +29,8 @@ interface ShellStream {
 
 export class ShellManager {
   private shell: ShellStream | null = null;
-  private localProcess: ChildProcess | null = null;
   private ptyProcess: pty.IPty | null = null;
+  private ptyDisposables: pty.IDisposable[] = []; // node-pty onData/onExit 订阅；reset/close 时 dispose，否则反复开本地 pty 会累积
   private outputBuffer: string = "";
   private outputLines: string[] = [];
   private lastOutputTime: number = 0;
@@ -92,12 +91,13 @@ export class ShellManager {
         const closeListeners: (() => void)[] = [];
         const errorListeners: ((err: Error) => void)[] = [];
 
-        ptyProc.onData((data: string) => {
+        const dataDisp = ptyProc.onData((data: string) => {
           dataListeners.forEach((l) => l(Buffer.from(data)));
         });
-        ptyProc.onExit(() => {
+        const exitDisp = ptyProc.onExit(() => {
           closeListeners.forEach((l) => l());
         });
+        this.ptyDisposables = [dataDisp, exitDisp];
 
         const stream: ShellStream = {
           write: (data: string) => ptyProc.write(data),
@@ -147,9 +147,11 @@ export class ShellManager {
 
     // 监听关闭事件
     stream.on("close", () => {
-      this.shell = null;
-      this.localProcess = null;
-      this.ptyProcess = null;
+      // 守卫：reset 后旧 stream 的 close 可能晚到，别误清掉已经重开的新 shell
+      if (this.shell === stream) {
+        this.shell = null;
+        this.ptyProcess = null;
+      }
     });
 
     stream.on("error", (err: Error) => {
@@ -310,8 +312,8 @@ export class ShellManager {
     if (this.shell) {
       try { this.shell.end(); } catch { /* ignore */ }
     }
+    this.disposePty();
     this.shell = null;
-    this.localProcess = null;
     this.ptyProcess = null;
     this.outputBuffer = "";
     this.outputLines = [];
@@ -326,10 +328,7 @@ export class ShellManager {
       this.shell.end();
       this.shell = null;
     }
-    if (this.localProcess) {
-      this.localProcess.kill();
-      this.localProcess = null;
-    }
+    this.disposePty();
     if (this.ptyProcess) {
       this.ptyProcess.kill();
       this.ptyProcess = null;
@@ -337,6 +336,14 @@ export class ShellManager {
     this.outputLines = [];
     this.outputBuffer = "";
     this.isLocal = false;
+  }
+
+  /** dispose node-pty 的 onData/onExit 订阅（reset/close 都要调） */
+  private disposePty(): void {
+    for (const d of this.ptyDisposables) {
+      try { d.dispose(); } catch { /* ignore */ }
+    }
+    this.ptyDisposables = [];
   }
 
   /**
