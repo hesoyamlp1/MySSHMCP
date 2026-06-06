@@ -41,10 +41,12 @@ function callTimeoutFor(args: Record<string, unknown>): number {
 /**
  * 是否「连接层」失效（可安全重连重发）。
  * 命令执行中的超时 / 业务错误不算——那种重发可能让有副作用的命令跑两遍。
+ * 含下游 daemon 重启后的 session 失效（Mcp-Session-Id 失效；daemon 是拒收、命令没执行，
+ * 所以重连重发安全）——否则 kickstart 下游 daemon 后该 node 会一直卡在 stale session。
  */
 function isConnectionError(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
-  return /not connected|connection closed|terminated|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|fetch failed|transport/i.test(msg);
+  return /not connected|connection closed|terminated|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|fetch failed|transport|mcp-session-id|initialize first/i.test(msg);
 }
 
 /**
