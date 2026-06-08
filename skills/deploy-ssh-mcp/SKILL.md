@@ -194,3 +194,56 @@ launchctl bootout gui/$(id -u) "$PLIST"; launchctl bootstrap gui/$(id -u) "$PLIS
 ## ssh-mac（旧的单机直连，已退役）
 
 历史上 VPS 还注册过一个 `ssh-mac`（`claude mcp add --transport http ssh-mac http://127.0.0.1:27777/mcp --header "Authorization: Bearer <TOKEN>"`）直连「当前占住 27777 的那台 mac」（单活）。三台 mac 全部接入 hub 后 ssh-mac 已 `claude mcp remove ssh-mac -s user` 退役、27777 留空。需要临时单机直连某台时仍可这样注册（不经 hub），但常态用 hub。
+
+---
+
+# Playwright（浏览器跑在 mac，单活；给前端开发用）
+
+前端开发要驱动浏览器 + 截图，但 VPS 资源不够跑 chromium。解法和 hub **对称**——浏览器跑在 mac、VPS 只当 MCP 客户端。但 playwright 是「天然单机」（一次只在一台机器上开发一个前端），所以用**单活**而非 hub：VPS 一个 playwright 注册、固定端口 **8930**，谁开发谁的 mac 起 daemon 占隧道。
+
+```
+VPS Claude → playwright MCP (http://127.0.0.1:8930/mcp) → 反向隧道 8930 → 那台 mac 的 playwright-mcp → chromium
+```
+截图走 MCP image content 自动回 Claude，不用落地处理。
+
+## 每台 mac 装一份（daemon 按需起）
+
+```bash
+npm i -g @playwright/mcp@latest
+npx --yes playwright install chromium      # 浏览器装过就跳过（mini1/mini2 之前装过）
+```
+- `~/.mori/pw-up.sh`（0755）：`tmux` 起 `playwright-mcp --port 8930 --host 127.0.0.1 --headless --allowed-hosts "*"` + 裸 `ssh -fN -R 127.0.0.1:8930:127.0.0.1:8930 vircs`
+- `~/.mori/pw-down.sh`（0755）：`tmux kill-session -t pwmcp` + `pkill -f 'ssh.*-R.*8930'`
+- ssh-servers.json 的 `localShortcuts` 加 `pw-up`/`pw-down`（command=`bash ~/.mori/pw-{up,down}.sh`），`launchctl kickstart` 生效
+
+## VPS 注册（一次，单活口）
+
+```bash
+claude mcp add -s user --transport http playwright http://127.0.0.1:8930/mcp
+```
+
+## 用法
+
+```
+ssh({node:"<那台>", shortcut:"pw-up"})   # 起 daemon+隧道占 8930
+→ /mcp 重连 playwright                    # 浏览器就在那台跑
+ssh({node:"<那台>", shortcut:"pw-down"})  # 用完释放；换机：down 旧台、up 新台（8930 单活）
+```
+是哪台 = 你在哪台 pw-up 的（ssh-hub 起停显式）。dev server 跟 playwright 放同台、navigate localhost。
+
+## 踩过的坑
+
+| 坑 | 处理 |
+|---|---|
+| **8931（playwright-mcp 默认端口）被 VSCode Code Helper 抢** EADDRINUSE | 用 **8930** |
+| 经隧道 curl playwright 直接 **403**（默认 host 防护） | 起 daemon 加 `--allowed-hosts "*"`（隧道只 localhost，安全） |
+| 端点路径 | **`/mcp`**（streamable http）；`/sse` 是 legacy |
+| 隧道建不起来 / 反而把别的转发清了 | 用**裸** `ssh -fN -R 8930 vircs`：**别加** `ClearAllForwardings=yes`（会把命令行 `-R` 也清掉）、**别加** `ExitOnForwardFailure=yes`（vircs 块的 27778/27779/9022 撞已有连接会拦死整条）；裸 `-R` 时那些撞只警告、8930 照样建 |
+| 诊断脚本里 `timeout` 报 command not found | mac 没有 GNU `timeout` |
+| 想 headed（亲眼看浏览器） | launchd 无 GUI 只能 headless；headed 用 `--cdp-endpoint` 连你手开的 Chrome |
+
+## MCP 生命周期
+
+playwright daemon 没起时，VPS 那个注册显示 `✗ Failed to connect`（不影响别的 MCP、工具 deferred 不占 context）。起 daemon 后 **`/mcp` 手动重连即可，不用重开 session**——Claude Code 没有自动 enable / lazy-connect 机制（v2.1）。
+
+> ⚠️ `kickstart` 下游 mac 的 mcp daemon 后，hub 会短暂断；v2.5.3 起 hub 自动重连（session 失效也触发 drop+重连）。但 `npm i -g` 升级 hub 全局 bin 后，**当前跑的 ssh-hub 进程要 `/mcp` 重连才换新版**。
