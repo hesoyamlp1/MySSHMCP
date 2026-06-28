@@ -1,0 +1,21 @@
+README.md
+  s_7628831b1f0544::t_aa5755274b9eac 52-56,60,67-69,78
+hub.example.json
+  s_7628831b1f0544::t_a60e39169d4e97 16,23-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "67cac7c0ddf727da6c22c534b24c90a2cbb136e8",
+  "prompts": {},
+  "sessions": {
+    "s_7628831b1f0544": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "299980c2-06f6-4ded-9468-9ea5ac67dee0",
+        "model": "unknown"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
