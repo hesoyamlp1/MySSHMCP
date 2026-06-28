@@ -1,6 +1,6 @@
 # @mori-mori/mcp-ssh-pty
 
-MCP Server for SSH remote command execution with PTY shell support.
+MCP Server for SSH remote command execution. 命令默认走无头 `exec` 通道（一发一收、独立、直接拿 exitCode、输出无需清洗、不会卡死 session）；交互式 REPL / TUI / 需保留 shell 状态的场景用 `mode:"pty"`（持久 PTY shell，首次用到才懒加载）。
 
 ## Installation
 
@@ -43,7 +43,7 @@ claude mcp add --transport http ssh-remote http://127.0.0.1:7777/mcp \
 
 方案：**hub 模式**。同一个二进制有两种角色：
 
-- **直连模式**（默认 / `--http`）：直接做 SSH/PTY 的活。每台 mac 上各跑一个 `--http` daemon，经反向隧道暴露到 VPS。
+- **直连模式**（默认 / `--http`）：直接做 SSH 命令执行的活（默认 exec 通道，可选 PTY）。每台 mac 上各跑一个 `--http` daemon，经反向隧道暴露到 VPS。
 - **hub 模式**（`--hub`）：跑在 VPS，对 Claude 只露一个 `ssh`/`sftp`，内部按 `node` 路由到各 mac 的 daemon（自己既是 MCP server 又是各 daemon 的 client）。VPS 自己作为一个 in-process node 直接进 hub，不用额外起 daemon。
 
 ```
@@ -175,18 +175,25 @@ ssh({ action: "connect", server: "my-server" })  # Remote SSH
 
 ### Command Execution
 
-```
-ssh({ command: "ls -la" })
-ssh({ command: "whoami" })
-```
-
-### Interactive Programs
+默认走 **exec 通道**：一发一收、独立、直接返回 stdout/stderr/exitCode，输出无需清洗，且不会被 heredoc / 续行符卡死 session。
 
 ```
-ssh({ command: "mysql -u root -p" })
-ssh({ command: "password123" })
-ssh({ command: "SHOW DATABASES;" })
+ssh({ command: "ls -la" })                            # 默认 exec，返回 stdout + exitCode
+ssh({ command: "make test", timeout: 120 })
+ssh({ command: "python3 -", stdin: "print(1+1)" })    # 多行内容喂 stdin（exec 通道）
 ```
+
+### Interactive / 持久 shell（`mode:"pty"`）
+
+交互式 REPL、TUI（vim/top/less）、`tail -f` + Ctrl-C、需要跨命令保留 cwd/env 时用 `mode:"pty"`（PTY 首次用到才懒加载；`interactive` / `signal` / `read` 都隐含 pty）。
+
+```
+ssh({ command: "mysql -u root -p", mode: "pty" })
+ssh({ command: "password123", mode: "pty", interactive: true })
+ssh({ command: "SHOW DATABASES;", mode: "pty", interactive: true })
+```
+
+> ⚠️ 仅 pty 模式有 heredoc/续行符卡死风险：`mode:"pty"` 下别内联 heredoc 或留未闭合引号；多行内容用 `sftp.write` 或默认 exec 的 `stdin`。
 
 ### Read Buffer
 
@@ -196,10 +203,10 @@ ssh({ read: true, lines: -1 })     # All
 ssh({ read: true, lines: 100 })    # 100 lines
 ```
 
-### Signal Control
+### Signal Control（`mode:"pty"`）
 
 ```
-ssh({ command: "tail -f /var/log/syslog" })
+ssh({ command: "tail -f /var/log/syslog", mode: "pty" })
 ssh({ read: true })
 ssh({ signal: "SIGINT" })          # Ctrl+C
 ```
