@@ -1,0 +1,27 @@
+package.json
+  s_7628831b1f0544::t_60b45537e00176 3
+src/hub.ts
+  s_7628831b1f0544::t_d2932b24e95cb3 100-104
+src/ssh-manager.ts
+  s_7628831b1f0544::t_19f2153259e25a 60-62,65-67,173-174,303-304,409-443,452
+src/tool-schemas.ts
+  s_7628831b1f0544::t_1d153b17027a5d 16,29-30,32-33
+src/tools.ts
+  s_7628831b1f0544::t_ddf95c4ee8cff5 39-50,139,181-200,209-210,212,214-216,219,222,258,263-264,271-274,276-278,298,311-316,346-357,433-435,460-461,498-500,521-522,614,662
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "e31aa22e398901519016814359cd4e6b6990f7e3",
+  "prompts": {},
+  "sessions": {
+    "s_7628831b1f0544": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "299980c2-06f6-4ded-9468-9ea5ac67dee0",
+        "model": "unknown"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
