@@ -49,22 +49,24 @@ claude mcp add --transport http ssh-remote http://127.0.0.1:7777/mcp \
 ```
 Claude Code (VPS)
   └─ 一条注册：ssh-hub (stdio) → mcp-ssh-pty --hub  → 读 ~/.mori/ssh/hub.json
-       ├─ in-process 直连 → vps（VPS 本机 shell）
-       ├─ http://127.0.0.1:27777 → macbook daemon (--http)        ┐ 各 mac daemon 本地仍 27777，
-       └─ http://127.0.0.1:27778 → mac-mini-1 daemon (--http)     ┘ 反向隧道错开暴露到 VPS 不同端口
-     ssh({action:"list"}) → 逐 node 探活 online；connect node=macbook → 路由到该 daemon
+       ├─ in-process 直连           → vps          （VPS 本机 shell）
+       ├─ http://127.0.0.1:27778/mcp → macbook-air  （公司·主力）  ┐ 各 mac daemon 本地都听 27777，
+       ├─ http://127.0.0.1:27779/mcp → mac-mini-1   （公司·备用）  ┤ 反向隧道错开暴露到 VPS 不同端口
+       └─ http://127.0.0.1:27780/mcp → mac-mini-2   （家里）       ┘ （27777 保留留空，hub 端口从 27778 起）
+     ssh({action:"list"}) → 逐 node 探活 online；connect node=macbook-air → 路由到该 daemon
 ```
 
 - 一条注册管全部；每台 mac 仍是自己的 daemon 在干活 → 保留**一跳 sftp**、本地直连、各自 notes/shortcuts。
-- 每个 node 是独立下游连接 → 多台 mac 的 PTY 可**同时活着**，hub 只负责路由。
+- 每个 node 是独立下游连接 → 多台 mac 的连接（exec 通道 / PTY）可**同时活着**，hub 只负责路由。
 
 hub 配置 `~/.mori/ssh/hub.json`（见 `hub.example.json`）：
 
 ```json
 { "nodes": [
   { "name": "vps", "local": true },
-  { "name": "macbook",    "url": "http://127.0.0.1:27777/mcp", "token": "..." },
-  { "name": "mac-mini-1", "url": "http://127.0.0.1:27778/mcp", "token": "..." }
+  { "name": "macbook-air", "url": "http://127.0.0.1:27778/mcp", "token": "..." },
+  { "name": "mac-mini-1",  "url": "http://127.0.0.1:27779/mcp", "token": "..." },
+  { "name": "mac-mini-2",  "url": "http://127.0.0.1:27780/mcp", "token": "..." }
 ] }
 ```
 
@@ -73,7 +75,7 @@ hub 配置 `~/.mori/ssh/hub.json`（见 `hub.example.json`）：
 ```bash
 claude mcp add ssh-hub -- mcp-ssh-pty --hub
 # ssh({action:"list"})                              # 所有 node + online + 各 node 的 server
-# ssh({node:"macbook", action:"connect", server:"local"})   # 连 macbook 本机
+# ssh({node:"macbook-air", action:"connect", server:"local"})   # 连 macbook-air 本机
 # ssh({command:"..."})                              # 在当前 node 当前连接上执行
 ```
 

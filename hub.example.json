@@ -13,14 +13,21 @@
       "name": "macbook-air",
       "url": "http://127.0.0.1:27778/mcp",
       "token": "和该 mac MCP_HTTP_TOKEN 一致的字符串",
-      "note": "主力开发机，内网核心；合盖会睡 → online 变 false"
+      "note": "公司·主力开发机；合盖不睡常在线"
     },
     {
       "//": "再来一台 mac mini：daemon 本地仍 27777，反向隧道再错开到 VPS 的 27779",
       "name": "mac-mini-1",
       "url": "http://127.0.0.1:27779/mcp",
       "token": "和该 mac MCP_HTTP_TOKEN 一致的字符串",
-      "note": "常驻不休眠，跑长任务 / 内网服务"
+      "note": "公司·备用；跑长任务 / 内网服务"
+    },
+    {
+      "//": "第三台：还是错开端口（27780）。加新机就照抄一条、端口顺延（27781…），27777 永久留空",
+      "name": "mac-mini-2",
+      "url": "http://127.0.0.1:27780/mcp",
+      "token": "和该 mac MCP_HTTP_TOKEN 一致的字符串",
+      "note": "家里机（家庭网段 192.168.31.x）"
     }
   ]
 }
