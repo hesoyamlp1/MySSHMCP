@@ -57,29 +57,14 @@ export class SSHManager {
   }
 
   /**
-   * 本地连接。优先用 node-pty 开真 PTY；
-   * 若 PTY 申请失败（典型原因：macOS launchd 托管的 daemon 无 TTY session），
-   * 自动降级为"SSH loopback"——通过 ssh2 连 127.0.0.1 走自家 sshd，
-   * sshd 会分配真 PTY，对 LLM 完全透明。
+   * 本地连接。连接层只标记状态，**不开 PTY**——纯 exec 走 execLocal(child_process)，根本不需要 PTY。
+   * PTY 在首次 pty 模式调用时懒加载（ensureShell → openShellChannel）：
+   * 优先 node-pty，失败（典型：macOS launchd 托管的 daemon 无 TTY session）降级 ssh loopback。
    */
   private async connectLocal(): Promise<void> {
-    try {
-      await this.shellManager.openLocal();
-      this.isConnected = true;
-      this.isLocalConnection = true;
-      this.currentServer = LOCAL_SERVER;
-      return;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      console.error(`[mcp-ssh-pty] local PTY failed (${msg}); falling back to ssh loopback 127.0.0.1:22`);
-      try {
-        await this.connectLoopbackSSH();
-      } catch (loopErr) {
-        this.cleanup();
-        const loopMsg = loopErr instanceof Error ? loopErr.message : String(loopErr);
-        throw new Error(`无法打开本地 shell（PTY 失败：${msg}；loopback SSH 失败：${loopMsg}）`);
-      }
-    }
+    this.isConnected = true;
+    this.isLocalConnection = true;
+    this.currentServer = LOCAL_SERVER;
   }
 
   /**
@@ -185,14 +170,8 @@ export class SSHManager {
         this.isLocalConnection = false;
         this.currentServer = config;
 
-        // 连接成功后自动打开 shell（使用局部变量避免竞态）
-        try {
-          await this.shellManager.open(client);
-          resolve();
-        } catch (err) {
-          this.cleanup();
-          reject(err);
-        }
+        // PTY 懒加载（ensureShell）：连接层就绪即返回，不在此处开 shell
+        resolve();
       });
 
       client.on("error", (err) => {
@@ -321,13 +300,8 @@ export class SSHManager {
         this.isLocalConnection = false;
         this.currentServer = config;
 
-        try {
-          await this.shellManager.open(client);
-          resolve();
-        } catch (err) {
-          this.cleanup();
-          reject(err);
-        }
+        // PTY 懒加载（ensureShell）：连接层就绪即返回
+        resolve();
       });
 
       client.on("error", (err) => {
@@ -433,6 +407,41 @@ export class SSHManager {
   }
 
   /**
+   * 真正打开一条 PTY shell channel：按连接类型选 node-pty / ssh loopback / 远端 client。
+   * local 且还没 client 时先试 node-pty，失败降级 ssh loopback（建 loopback client 并在其上开 shell）。
+   * ensureShell（懒加载）和 resetShell（重开）都复用它。
+   */
+  private async openShellChannel(): Promise<void> {
+    if (this.isLocalConnection && !this.client) {
+      try {
+        await this.shellManager.openLocal();
+        return;
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`[mcp-ssh-pty] local PTY failed (${msg}); falling back to ssh loopback 127.0.0.1:22`);
+        await this.connectLoopbackSSH(); // 建 loopback client 并在其上开 shell
+        return;
+      }
+    }
+    if (!this.client) {
+      throw new Error("找不到 SSH client，无法开启 PTY shell");
+    }
+    await this.shellManager.open(this.client);
+  }
+
+  /**
+   * 懒加载 PTY shell：仅在确实要走 pty 模式（command mode:"pty" / signal / interactive REPL）时调用。
+   * 已开则直接返回；纯 exec 的 session 永远不触发，也就永远不会被 heredoc 卡死。
+   */
+  async ensureShell(): Promise<void> {
+    if (!this.isConnected) {
+      throw new Error("未连接，无法开启 PTY shell");
+    }
+    if (this.shellManager.isOpen()) return;
+    await this.openShellChannel();
+  }
+
+  /**
    * 硬复位 PTY shell：保留 SSH client（不重连）/ 本地连接信息，只关掉当前 shell channel
    * 重开一条干净的。比 disconnect+reconnect 快得多。
    */
@@ -440,18 +449,7 @@ export class SSHManager {
     if (!this.isConnected) {
       throw new Error("未连接，无法重置 shell");
     }
-    await this.shellManager.hardReset(async () => {
-      // 本地 pty 路径（无 client）：重新拉一个 node-pty
-      if (this.isLocalConnection && !this.client) {
-        await this.shellManager.openLocal();
-        return;
-      }
-      // 其他情况（远端 / 本地 ssh loopback）：在原 client 上重开 shell
-      if (!this.client) {
-        throw new Error("找不到 SSH client，无法重开 shell");
-      }
-      await this.shellManager.open(this.client);
-    });
+    await this.shellManager.hardReset(() => this.openShellChannel());
   }
 
   getStatus(): ConnectionStatus {

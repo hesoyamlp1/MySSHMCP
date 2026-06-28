@@ -37,6 +37,18 @@ function truncateIfLarge(resultObj: Record<string, unknown>): string {
 }
 
 /**
+ * 解析执行通道：显式 mode 优先；interactive(REPL 输入) 隐含 pty；否则默认 exec。
+ */
+function resolveMode(
+  mode: "exec" | "pty" | undefined,
+  interactive: boolean | undefined
+): "exec" | "pty" {
+  if (mode) return mode;
+  if (interactive) return "pty";
+  return "exec";
+}
+
+/**
  * 跑一条 exec（绕过 PTY）：local 走 child_process，远端走 ssh2 client.exec
  */
 async function runExec(
@@ -124,7 +136,7 @@ export function registerTools(
   server.registerTool(
     "ssh",
     {
-      description: `SSH 远程服务器连接管理和 PTY Shell 交互。
+      description: `SSH 远程服务器连接管理和命令执行（命令默认走无头 exec 通道；交互式/持久场景可选 mode:"pty"）。
 
 ## 连接管理 (action)
 - list: 列出所有可用服务器（每条带 online 端口探活 + 备注摘要 + 全局 hints）；传 onlineOnly=true 只列当前在线（反向隧道已连）的机器
@@ -166,18 +178,26 @@ list 响应附带 globalHints；connect 响应附带 globalHints + 该服务器 
 - shortcut 在当前 PTY shell 中执行，行为和普通 command 一致，支持 timeout 参数
 
 ## 命令执行 (command)
-直接提供 command 参数执行命令，支持交互式程序。
+直接提供 command 参数执行命令。两条通道由 mode 选择，默认 exec。
 
-### 默认路径：PTY shell（持久 session）
-适合：cd / source / 启动 REPL / 跟踪日志 / 短促命令。环境（cwd / env / shell 状态）会被后续命令继承。
+### 默认路径：exec 通道（无头、一次性）— mode 不传即走这里
+独立通道、一发一收，直接返回 stdout/stderr/exitCode；输出无需清洗（天生没有终端），
+也**绝不会**被 heredoc/续行符/未闭合引号卡死 session。绝大多数"跑一条命令看结果"用它。
+- stdin 参数在这里生效：多行 yaml/sql/python 喂给 kubectl apply -f - / python3 - / psql / jq
+- 注意：exec **不继承** cwd/env，每次都是 sshd 默认环境（远端）/ daemon cwd（local）。
+  依赖前一句 cd 的目录 → 要么 'cd /xxx && your-cmd' 一次写完，要么改 mode:"pty"。
 
-### 替代路径：exec 通道（独立、无 PTY）
-触发条件：传入 stdin 参数 **或** 显式 exec=true。
-适合：
-- 多行内容做命令的 stdin（kubectl apply -f -、python3 -、psql、jq 等）—— **必用** exec，PTY heredoc 极易被 bracketed-paste 弄花
-- 任何只关心 stdout/stderr/exitCode 的一次性命令
-exec 路径**不继承** PTY shell 当前 cwd 和 env，每次都是 sshd 默认环境（远端）/ daemon cwd（local）。
-如果命令依赖前一句 cd 后的工作目录，要么显式 'cd /xxx && your-cmd' 一次写完，要么继续走 PTY。
+### 可选路径：PTY shell（mode:"pty"，持久 session）
+mode:"pty"（或 interactive:true）才进；PTY 在首次 pty 调用时懒加载（连接时不开）。
+跨命令继承 cwd / env / shell 状态。适合：
+- 交互式 REPL（mysql/python/redis-cli）、TUI（vim/top/less）
+- tail -f 跟日志 + 之后 signal:"SIGINT" 中断
+- 连续依赖 cd / source / venv 的多步操作
+
+🚫 仅 pty 模式的铁律：mode:"pty" 时 command 绝不内联 heredoc（<<EOF）/ 绝不留未闭合的引号、反斜杠、行尾管道
+——会把 PTY 卡死在 heredoc>/quote> 续行符、sentinel 永远等不到、整条 session 报废。
+多行写文件→sftp write；多行喂 stdin→改用默认 exec + stdin 参数；非要内联→单行 printf。
+万一已卡→signal:"RESET"，救不回再 action:"reset_shell"。
 
 ## Shell 控制
 - read: 设为 true 读取缓冲区（配合 lines/offset/clear）
@@ -186,19 +206,20 @@ exec 路径**不继承** PTY shell 当前 cwd 和 env，每次都是 sshd 默认
   - RESET：Ctrl-C → 等待 → Ctrl-U → 换行。卡在 heredoc>/dquote>/cmdand 续行 prompt 时用，比单 SIGINT 狠
 - action=reset_shell：保留 SSH 连接，**关掉当前 PTY shell 重开一条**。RESET 都救不回来时用，比 disconnect+reconnect 快
 
-## 输出清洗
-返回的 output 默认经过清洗：ANSI 控制序列、PTY 命令回显、bracketed-paste 标记、
+## 输出清洗（仅 pty 模式）
+pty 模式返回的 output 经过清洗：ANSI 控制序列、PTY 命令回显、bracketed-paste 标记、
 末尾 prompt 行都已剥离，只剩命令真实 stdout/stderr。需要原始 PTY 流时传 read({ raw: true })。
+（exec 模式无终端、无回显，stdout/stderr 原样返回，不需要也不做这层清洗。）
 
-## 完成检测（sentinel）
-默认在用户命令后追加一条 sentinel printf，见到 __MCP_DONE_<id>_<rc>__ 即视为完成，
-并在 result 里填 exitCode 字段。比传统 prompt 正则更稳，能直接判断成功失败。
+## 完成检测（sentinel，仅 pty 模式）
+pty 模式下在用户命令后追加一条 sentinel printf，见到 __MCP_DONE_<id>_<rc>__ 即视为完成，
+并在 result 里填 exitCode 字段。（exec 模式无需 sentinel：通道关闭即拿到 exitCode。）
 sentinel 字样会从输出里自动剥掉。
 
-启动 REPL（mysql/python/redis-cli/ssh 跳板）或向 REPL 内部输入子命令时，
+pty 模式下启动 REPL（mysql/python/redis-cli/ssh 跳板）或向 REPL 内部输入子命令时，
 必须带 interactive=true 跳过 sentinel 包装，否则 sentinel printf 会被打进 REPL 当输入。
 
-## 智能输出检测（fallback / interactive 模式）
+## 智能输出检测（仅 pty 的 fallback / interactive 模式）
 - 快速命令（<2秒）：检测到提示符后返回
 - 慢速命令（2-5秒）：标记 slow=true
 - 超时命令（>maxTimeout）：截断到最近 200 行，标记 truncated=true
@@ -234,27 +255,27 @@ ssh({ command: "pip install tensorflow", timeout: 120 })  # 等待最多 120 秒
 ssh({ action: "status" })
 ssh({ action: "disconnect" })
 
-### 通过 stdin 喂多行内容（exec 通道）
+### 通过 stdin 喂多行内容（默认 exec 通道）
 ssh({ command: "python3 -", stdin: "import json\\nprint(json.dumps({'ok':1}))" })
 ssh({ command: "kubectl apply -f -", stdin: "<整段 yaml>" })
 ssh({ command: "psql -d mydb", stdin: "SELECT 1;\\nSELECT 2;" })
 
-### 仅想要干净 exec（拿 exitCode 不污染 PTY）
-ssh({ command: "make test", exec: true, timeout: 120 })
+### 默认就是干净 exec（拿 exitCode，不碰 PTY）
+ssh({ command: "make test", timeout: 120 })   # mode 不传即 exec
 
 ### 读取缓冲区
 ssh({ read: true })                    # 读取最近 20 行
 ssh({ read: true, lines: -1 })         # 读取全部
 ssh({ read: true, lines: 100 })        # 读取 100 行
 
-### 交互式程序
-ssh({ command: "mysql -u root -p" })   # 启动 mysql
-ssh({ command: "password123" })         # 输入密码
-ssh({ command: "SHOW DATABASES;" })     # 执行 SQL
+### 交互式程序（需 mode:"pty"）
+ssh({ command: "mysql -u root -p", mode: "pty" })                    # 启动 mysql（持久会话）
+ssh({ command: "password123", mode: "pty", interactive: true })     # 输入密码
+ssh({ command: "SHOW DATABASES;", mode: "pty", interactive: true }) # 执行 SQL
 
-### 信号控制
-ssh({ command: "tail -f /var/log/syslog" })
-ssh({ read: true })                     # 查看输出
+### 信号控制（pty 模式才有可中断的会话）
+ssh({ command: "tail -f /var/log/syslog", mode: "pty" })
+ssh({ read: true })                     # 查看 pty 缓冲
 ssh({ signal: "SIGINT" })               # Ctrl+C 停止
 
 ### 服务器备注
@@ -274,7 +295,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
 如输出超过 8000 字符，完整内容会保存到本地文件，仅返回尾部摘要 + 文件路径，可通过 Read/Grep 工具查看。`,
       inputSchema: SSH_INPUT_SHAPE,
     },
-    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun, interactive, raw, stdin, exec, onlineOnly }): Promise<CallToolResult> => {
+    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun, interactive, raw, stdin, exec, mode, onlineOnly }): Promise<CallToolResult> => {
       try {
         // 1. 发送信号
         if (signal) {
@@ -287,6 +308,12 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
           }
 
           const shellManager = sshManager.getShellManager();
+          if (!shellManager.isOpen()) {
+            return {
+              content: [{ type: "text", text: "当前无活跃 PTY shell（exec 模式命令不可中断）。需要可中断/可发信号的会话，请先用 mode:\"pty\" 跑命令。" }],
+              isError: true,
+            };
+          }
           let success: boolean;
           if (signal === "RESET") {
             success = await shellManager.resetLine();
@@ -316,6 +343,18 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
           }
 
           const shellManager = sshManager.getShellManager();
+          if (!shellManager.isOpen()) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  server: status.serverName,
+                  output: "",
+                  message: "当前无 PTY 缓冲：本 session 还没用过 pty 模式（exec 模式不保留缓冲，命令输出直接在调用结果里返回）。",
+                }, null, 2),
+              }],
+            };
+          }
           const result = shellManager.read(lines, offset, clear, raw);
 
           return {
@@ -391,8 +430,9 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             ? Math.min(Math.max(timeout, 5), 300) * 1000
             : undefined;
 
-          // shortcut 配置了 stdin 或调用方显式 exec=true：走 exec 通道（绕开 PTY）
-          if (split.stdin !== undefined || exec) {
+          const effMode = resolveMode(mode, interactive);
+          // shortcut 配了 stdin（必须喂 stdin）或解析为 exec 模式：走 exec 通道（绕开 PTY）
+          if (split.stdin !== undefined || effMode === "exec") {
             try {
               const execResult = await runExec(sshManager, split.command, split.stdin, timeoutMs);
               return {
@@ -417,7 +457,8 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             }
           }
 
-          // 默认路径：仍走 PTY shell（保留 cwd / env / interactive 行为）
+          // pty 模式：懒开 PTY shell（保留 cwd / env / interactive 行为）
+          await sshManager.ensureShell();
           const shellManager = sshManager.getShellManager();
           const result = await shellManager.send(
             split.command,
@@ -454,8 +495,9 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             ? Math.min(Math.max(timeout, 5), 300) * 1000
             : undefined;
 
-          // 传了 stdin 或显式 exec=true：走独立 exec 通道，不污染 PTY shell
-          if (stdin !== undefined || exec) {
+          const effMode = resolveMode(mode, interactive);
+          // exec 模式（默认）：独立通道、一发一收、直接拿 exitCode，不碰 PTY shell
+          if (effMode === "exec") {
             try {
               const execResult = await runExec(sshManager, command, stdin, timeoutMs);
               return {
@@ -476,6 +518,8 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             }
           }
 
+          // pty 模式：懒开持久 PTY shell
+          await sshManager.ensureShell();
           const shellManager = sshManager.getShellManager();
           const result = await shellManager.send(
             command,
@@ -567,7 +611,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
                 content: [{
                   type: "text",
                   text: JSON.stringify({
-                    message: "成功连接到本地 Shell",
+                    message: "成功连接到本地（默认 exec 模式；交互式/持久 shell 用 mode:\"pty\"）",
                     notes: notes || undefined,
                     shortcuts: summarizeShortcuts(configManager.getEffectiveShortcuts("local"), "brief"),
                     hints: mergedHints.length > 0 ? mergedHints : undefined,
@@ -615,7 +659,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
               content: [{
                 type: "text",
                 text: JSON.stringify({
-                  message: `成功连接到 '${serverName}'，PTY Shell 已就绪`,
+                  message: `成功连接到 '${serverName}'（默认 exec 模式；交互式/持久 shell 用 mode:"pty"）`,
                   notes: notes || undefined,
                   shortcuts: summarizeShortcuts(configManager.getEffectiveShortcuts(serverName), "brief"),
                   hints: mergedHints.length > 0 ? mergedHints : undefined,

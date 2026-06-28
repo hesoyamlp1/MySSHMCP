@@ -97,7 +97,11 @@ export function buildHubServer(mgr: HubClientManager, version: string): McpServe
 - ssh({command:"..."})                           在当前 node 的当前连接上执行
 - ssh({node:"mac1", action:"connect", server:"0.2"})    连 mac1 背后的内网机（mac1 一跳）
 
-其余 action / command / shortcut / read / signal / timeout / stdin / exec 等语义与单机 ssh 工具完全一致，原样转发到目标 node 的 daemon。多台 mac 的连接互相独立、可同时活着；切 node 不影响其它 node 上正在跑的东西（长任务照例丢 tmux）。`,
+其余 action / command / shortcut / read / signal / timeout / stdin / mode 等语义与单机 ssh 工具完全一致，原样转发到目标 node 的 daemon。多台 mac 的连接互相独立、可同时活着；切 node 不影响其它 node 上正在跑的东西（长任务照例丢 tmux）。
+
+命令默认走 exec 通道（无头、一发一收、直接拿 exitCode、输出无需清洗、绝不会卡死 session）。只有交互式 REPL / TUI / tail -f + Ctrl-C / 需保留 cwd 的多步操作才用 mode:"pty"。
+
+🚫 仅 mode:"pty" 的铁律：pty 模式下 command 绝不内联 heredoc（<<EOF）、绝不留未闭合的引号/反斜杠/行尾管道——会让 shell 卡在 heredoc>/quote> 续行符上、sentinel 被当正文吞掉→整条 session 报废。多行内容：① 写文件 → sftp({action:"write"})；② 喂 stdin（python3 - / kubectl apply -f - / psql / jq）→ stdin 参数（默认就是 exec 通道）；③ 非要内联 → 单行 printf。万一已卡在 heredoc>/quote> → 先 signal:"RESET"，救不回来再 action:"reset_shell"。`,
       inputSchema: { node: nodeParam, ...SSH_INPUT_SHAPE },
     },
     async (rawArgs): Promise<CallToolResult> => {
