@@ -145,8 +145,29 @@ export function buildHubServer(mgr: HubClientManager, version: string): McpServe
   server.registerTool(
     "sftp",
     {
-      description: `多机 hub 的文件操作：转发到当前（或 node 指定）的 mac daemon 的 sftp。
-语义与单机 sftp 完全一致（upload/download/write/read）；文件在该 mac 与它的目标之间直接传，不经 VPS 中转。`,
+      description: `多机 hub 的文件操作：转发到当前（或 node 指定）node 的 daemon 执行。
+
+⚠️ 关键心智模型：所有路径都以「目标 node 的 daemon 所在机」为原点，**不是**以 VPS 为原点。
+在 mac node 上，localPath / path 指的是**那台 mac 的盘**；VPS 只是发起方，不自动充当任何一端。
+（这条最容易搞反，"传不了"基本都因为把 VPS 当成了 local。）
+
+## 四个操作
+- upload:   localPath(daemon 机) → remotePath(该 node 当前 SSH 连着的 server)。二进制安全、无大小上限、不过 Claude 上下文。
+- download: remotePath(当前连着的 server) → localPath(daemon 机)。同上。
+- write:    把内联文本写到 path；按当前连接自动判断落在 daemon 本机(server=local)还是它连着的远端。
+- read:     读 path 文本；判断同 write。
+
+## upload/download 前必须先"连对端"
+upload/download 传的是「daemon 机 ↔ 该 node **当前连着的** SSH server」之间。所以先用 ssh connect 把该 node 连到对端，再传：
+- mac↔VPS：先 ssh({node:"macbook-air", action:"connect", server:"VIRCS"})   // VIRCS = 本 VPS
+  然后 download = VPS→mac、upload = mac→VPS，二进制无损（已实测 sha256 一致）。
+- mac↔某内网机：先 connect 到那台内网机(0.2 / 水网智科 / …)，再 upload/download。
+- ❗连着 local（daemon 本机自己）时 upload/download 会被拒——同机文件操作用 write/read 或 ssh 的 cp/mv。
+  vps 节点本身也是 local 连接，同样只有 write/read，没有 upload/download。
+
+## write/read 只搬文本
+utf8 文本、read 默认 1MB 上限、内容要过 Claude 上下文。适合小脚本/配置/SQL/yaml 落盘、跨机搬**小文本**。
+二进制 / 大文件：一律走 upload/download（按上面"先连对端"的方式），别用 read→write 搬（会被 utf8 往返搞坏、被 1MB 截断）。`,
       inputSchema: {
         node: z
           .string()

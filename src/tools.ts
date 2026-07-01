@@ -887,11 +887,18 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
 
 需要先通过 ssh 工具连接服务器后才能使用。SFTP 通道会在首次调用时自动创建（远端连接）。
 
+⚠️ 路径以「本 daemon 所在机」为原点：localPath / path 指本机盘，remotePath 指**当前连着的**那台 SSH server。
+
 ## 操作
-- upload: 上传本地文件到远程（仅远程连接）
-- download: 从远程下载文件到本地（仅远程连接）
-- write:    把内联文本直接写到目标文件（local / 远程都支持）
-- read:     直接读出目标文件文本内容（local / 远程都支持）
+- upload:   localPath(本机) → remotePath(当前连着的远端)。二进制安全、无大小上限。仅远程连接。
+- download: remotePath(当前连着的远端) → localPath(本机)。同上。仅远程连接。
+- write:    把内联文本直接写到目标文件（local / 远程都支持；仅文本 utf8）
+- read:     直接读出目标文件文本内容（local / 远程都支持；仅文本 utf8，默认 1MB 上限）
+
+## upload/download 要先"连对端"
+它们传的是「本机 ↔ 当前 SSH 连着的 server」之间。要传给谁，就先 ssh connect 到谁，再 upload/download。
+连着 local（本机自己）时 upload/download 会被拒——同机文件用 write/read 或 ssh 的 cp/mv。
+二进制 / 大文件一律走 upload/download，别用 read→write 搬（utf8 往返会损坏、会被 1MB 截断）。
 
 ## 何时用 write 而不是 ssh.command
 **强烈推荐**任何"多行内容落盘"场景都用 sftp.write，不要用 ssh.command 拼 cat heredoc / echo / base64 decode：
