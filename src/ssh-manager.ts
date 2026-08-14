@@ -129,6 +129,9 @@ export class SSHManager {
         privateKey,
         // loopback 无 MITM 风险，跳过 host key 校验
         hostVerifier: () => true,
+        // 这条是 loopback（daemon 连它自己那台机的 22 口），不经网络、不会抖，
+        // 保持 30 秒快速判死反而有利于早点发现本机 sshd 出问题。
+        // 跨网络的那几处（远程直连 / 跳板）才放宽到 3 分钟。
         keepaliveInterval: 10000,
         keepaliveCountMax: 3,
       });
@@ -190,8 +193,11 @@ export class SSHManager {
         host: config.host,
         port: config.port || 22,
         username: config.username,
-        keepaliveInterval: 10000,   // 每 10 秒发送心跳
-        keepaliveCountMax: 3,       // 3 次无响应才断开
+        // 30 秒一次心跳，6 次无响应才断（3 分钟容忍）。
+        // 原为 10s×3=30 秒：跨境/经代理的链路正常抖动就会超过 30 秒，
+        // 连接被误判成断线。ssh2 不读 ~/.ssh/config，这里必须单独设。
+        keepaliveInterval: 30000,
+        keepaliveCountMax: 6,
       };
 
       // 如果有代理，使用代理 socket
@@ -259,8 +265,9 @@ export class SSHManager {
         host: jump.host,
         port: jumpPort,
         username: jump.username,
-        keepaliveInterval: 10000,
-        keepaliveCountMax: 3,
+        // 到跳板这一段同样跨网络，用 3 分钟容忍（见 connectSSH 处的说明）
+        keepaliveInterval: 30000,
+        keepaliveCountMax: 6,
       };
 
       if (jump.privateKeyPath) {
@@ -318,8 +325,9 @@ export class SSHManager {
       const connectConfig: Record<string, unknown> = {
         sock: jumpStream,
         username: config.username,
-        keepaliveInterval: 10000,
-        keepaliveCountMax: 3,
+        // 经跳板到最终目标这一段，同样 3 分钟容忍
+        keepaliveInterval: 30000,
+        keepaliveCountMax: 6,
       };
 
       if (config.privateKeyPath) {
