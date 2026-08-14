@@ -1,0 +1,19 @@
+src/ssh-manager.ts
+  s_d31b598a26c3bc::t_a2af271957dbe2 132-134,196-200,268-270,328-330
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "52d805814bd96a9b4f14dfbce5ae62914fa7587b",
+  "prompts": {},
+  "sessions": {
+    "s_d31b598a26c3bc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8754b8e1-d3ff-4ed9-acd3-43d741f5c7e4",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
