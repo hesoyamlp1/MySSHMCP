@@ -71,6 +71,24 @@ claude mcp list | grep ssh-hub   # ✓ Connected
 
 > MCP 工具在会话启动时加载：注册后要**新开会话**才看得到 `ssh-hub__ssh` / `ssh-hub__sftp`。
 
+### 可选：hub 常驻守护进程（`--hub --http`，v2.7.0 起）
+
+默认 stdio 注册 = 每个 Claude 会话一个 hub 进程（约 100M/个）。VPS 上开多个会话时改成一个常驻守护进程共用：
+
+```bash
+# systemd（VPS）：/etc/systemd/system/ssh-hub.service
+#   ExecStart=/usr/bin/mcp-ssh-pty --hub --http --port 27790 --host 127.0.0.1 --token <secret>
+#   Restart=always   User=root   Environment=HOME=/root
+# 端口纪律：27777 留空、27778~27780 是三台 mac 的隧道；hub 守护进程用 27790，只绑回环。
+claude mcp remove ssh-hub
+claude mcp add --transport http ssh-hub http://127.0.0.1:27790/mcp --header "Authorization: Bearer <secret>"
+curl -s http://127.0.0.1:27790/health        # activeSessions 应等于连着的会话数
+```
+
+- 每个 MCP 会话各自一份 HubClientManager（当前 node + 下游连接），互不串台；空闲 24h 才回收（`--idle-min` 可调，0 不回收）。
+- **重启守护进程 = 所有会话的 ssh-hub 都要 `/mcp` 重连**（服务端对旧 session 回 404）。发新版前先想好时机；不想受影响的会话继续用 stdio 注册即可，两种可以并存。
+- 守护进程必须跑 npm 发布版（`/usr/bin/mcp-ssh-pty`），不许指向仓库 dist（见 memory：别覆盖已发布的全局包）。
+
 ## 日常使用
 
 ```

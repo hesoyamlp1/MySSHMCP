@@ -82,6 +82,26 @@ claude mcp add ssh-hub -- mcp-ssh-pty --hub
 > 完整部署、端口纪律（每台 mac daemon 反向隧道**错开**到不同 VPS 端口）、单台 mac daemon 的部署、排错见 `skills/deploy-ssh-mcp/SKILL.md`。
 > `ssh-mac` 那种「每台 mac 一条 HTTP 注册」仍可用作单机直连，但多机统一管理推荐 hub。
 
+### hub 常驻守护进程（`--hub --http`，v2.7.0 起）
+
+默认的 `--hub` 是 stdio：**每个** Claude Code 会话起一个 hub 进程（每个约 100M）。VPS 上同时开五六个会话时，
+光 hub 就是 500M。加 `--http` 就变成**一个常驻守护进程服务所有会话**，每个 MCP 会话各自一份「当前 node + 到各 mac 的下游连接」，互不串台：
+
+```bash
+# 守护进程（VPS 上，只绑回环）
+mcp-ssh-pty --hub --http --port 27790 --host 127.0.0.1 --token <secret>
+#   --idle-min N   空闲会话回收阈值（分钟），hub 默认 1440（24h），0 = 不回收；直连 daemon 默认 30
+# 注册（HTTP，替代 stdio 那条）
+claude mcp add --transport http ssh-hub http://127.0.0.1:27790/mcp --header "Authorization: Bearer <secret>"
+# 看它活着没
+curl -s http://127.0.0.1:27790/health   # {"ok":true,"name":"ssh-hub","activeSessions":N,...}
+```
+
+要点：
+- **重启守护进程会让所有已连着的会话失去 MCP 会话**（回 404 `session_not_found`），得在各会话里 `/mcp` 重连；升级前先想好。stdio 的 `--hub` 仍然可用，谁不想受这个影响谁继续用 stdio。
+- 空闲回收阈值 hub 侧放得很宽（24h）：Claude 会话经常空半小时以上，回收了它下次 `ssh` 就得重新 initialize；hub 会话本身很小，下游 mac daemon 有自己的 30 分钟回收，hub 下次调用会自动重连。
+- 实测（VPS 本机）：经 HTTP hub 一条 `true` 约 25ms；到 mac 的远程命令约 180ms/次、首次 connect 1.1～1.4s（隧道往返为主）。
+
 ## CLI Commands
 
 ### List servers

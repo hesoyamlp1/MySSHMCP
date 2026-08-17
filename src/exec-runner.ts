@@ -122,7 +122,14 @@ export function execRemote(
 
 /**
  * 在 daemon 所在机器上跑一条命令（绕过 PTY，直接 child_process）。
- * 命令字符串通过 $SHELL -c 解释（非交互模式，不会加载 .zshrc 的 alias）。
+ * 命令字符串通过 $SHELL -c 解释（非交互模式，不加载 rc 文件、没有 alias）。
+ *
+ * 两个细节是为了不让 bash 偷偷去 source ~/.bashrc（Debian/Ubuntu 的 bash 打了 SSH_SOURCE_BASHRC 补丁：
+ * 非交互 -c 且 stdin 是 socket、SHLVL<2 时会当自己是 sshd/rshd 起的、照样跑 ~/.bashrc）：
+ * - 没有 stdin 内容时 stdin 用 /dev/null，不给 socket（node 的 "pipe" 底下是 socketpair）；
+ * - shell 是 bash 时加 --norc。
+ * 实测这台 VPS 的 ~/.bashrc 会跑 ssh-add -l 去探 mac 上转发过来的 agent，一次 500ms；
+ * 起 daemon 的客户端不带 SHLVL（SDK 默认 env、cron）时每条本地命令都要多等这 500ms。
  */
 export function execLocal(
   command: string,
@@ -131,12 +138,14 @@ export function execLocal(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const shell = process.env.SHELL || "/bin/sh";
+  const shellArgs = /(^|\/)bash$/.test(shell) ? ["--norc", "-c", command] : ["-c", command];
+  const hasStdin = options.stdin !== undefined;
 
   return new Promise<ExecResult>((resolve, reject) => {
     let child;
     try {
-      child = spawn(shell, ["-c", command], {
-        stdio: ["pipe", "pipe", "pipe"],
+      child = spawn(shell, shellArgs, {
+        stdio: [hasStdin ? "pipe" : "ignore", "pipe", "pipe"],
       });
     } catch (e) {
       reject(e instanceof Error ? e : new Error(String(e)));
@@ -204,10 +213,8 @@ export function execLocal(
       });
     });
 
-    if (options.stdin !== undefined) {
+    if (hasStdin) {
       child.stdin?.end(options.stdin);
-    } else {
-      child.stdin?.end();
     }
   });
 }

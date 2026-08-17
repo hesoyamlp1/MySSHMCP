@@ -159,20 +159,44 @@ export class SFTPManager {
     const encoding = options?.encoding ?? "utf8";
     const maxBytes = options?.maxBytes ?? 1024 * 1024; // 默认 1MB 上限
 
-    const buf = await new Promise<Buffer>((res, rej) => {
-      sftp.readFile(remotePath, (err, data) => {
+    // 先 stat 拿总长，再只读前 maxBytes：不把整个文件拉进内存（之前是 readFile 全读进来再截，
+    // 读几百 MB 的日志时 daemon 进程会瞬间涨到文件那么大）。
+    const total = await new Promise<number>((res, rej) => {
+      sftp.stat(remotePath, (err, st) => {
         if (err) rej(new Error(`读取远端失败: ${err.message}`));
-        else res(data);
+        else res(st.size);
       });
     });
+    const want = Math.min(total, maxBytes);
+    const handle = await new Promise<Buffer>((res, rej) => {
+      sftp.open(remotePath, "r", (err, h) => {
+        if (err) rej(new Error(`读取远端失败: ${err.message}`));
+        else res(h);
+      });
+    });
+    let buf = Buffer.alloc(want);
+    try {
+      let off = 0;
+      while (off < want) {
+        const n = await new Promise<number>((res, rej) => {
+          sftp.read(handle, buf, off, want - off, off, (err, bytesRead) => {
+            if (err) rej(new Error(`读取远端失败: ${err.message}`));
+            else res(bytesRead);
+          });
+        });
+        if (n === 0) break;
+        off += n;
+      }
+      buf = buf.subarray(0, off);
+    } finally {
+      await new Promise<void>((res) => sftp.close(handle, () => res()));
+    }
 
-    const truncated = buf.length > maxBytes;
-    const slice = truncated ? buf.subarray(0, maxBytes) : buf;
     return {
       path: remotePath,
-      bytes: buf.length,
-      content: slice.toString(encoding),
-      truncated,
+      bytes: total,
+      content: buf.toString(encoding),
+      truncated: total > maxBytes,
     };
   }
 
@@ -233,14 +257,28 @@ export class SFTPManager {
     const encoding = options?.encoding ?? "utf8";
     const maxBytes = options?.maxBytes ?? 1024 * 1024;
 
-    const buf = await fsp.readFile(safePath);
-    const truncated = buf.length > maxBytes;
-    const slice = truncated ? buf.subarray(0, maxBytes) : buf;
+    // 只读前 maxBytes，不整文件进内存
+    const st = await fsp.stat(safePath);
+    const want = Math.min(st.size, maxBytes);
+    const fh = await fsp.open(safePath, "r");
+    let buf: Buffer;
+    try {
+      buf = Buffer.alloc(want);
+      let off = 0;
+      while (off < want) {
+        const { bytesRead } = await fh.read(buf, off, want - off, off);
+        if (bytesRead === 0) break;
+        off += bytesRead;
+      }
+      buf = buf.subarray(0, off);
+    } finally {
+      await fh.close();
+    }
     return {
       path: safePath,
-      bytes: buf.length,
-      content: slice.toString(encoding),
-      truncated,
+      bytes: st.size,
+      content: buf.toString(encoding),
+      truncated: st.size > maxBytes,
     };
   }
 

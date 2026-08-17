@@ -32,6 +32,8 @@ interface HttpOptions {
   port: number;
   host: string;
   token: string | null;
+  /** 空闲会话回收阈值（分钟）；undefined = 用各模式的默认值，0 = 不回收 */
+  idleMin?: number;
 }
 
 /**
@@ -55,7 +57,14 @@ function parseHttpOptions(argv: string[]): HttpOptions | null {
   const host = getArg("--host") ?? process.env.MCP_HTTP_HOST ?? "127.0.0.1";
   const token = getArg("--token") ?? process.env.MCP_HTTP_TOKEN ?? null;
 
-  return { port, host, token };
+  const idleStr = getArg("--idle-min") ?? process.env.MCP_HTTP_IDLE_MIN;
+  let idleMin: number | undefined;
+  if (idleStr !== undefined) {
+    idleMin = Number(idleStr);
+    if (!Number.isFinite(idleMin) || idleMin < 0) throw new Error(`无效的 --idle-min: ${idleStr}`);
+  }
+
+  return { port, host, token, idleMin };
 }
 
 /**
@@ -95,8 +104,21 @@ async function startStdioServer(): Promise<void> {
 interface Session {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
-  sshManager: SSHManager;
+  /** 释放这个会话独占的资源（直连模式：SSHManager；hub 模式：到各 node 的下游连接） */
+  close: () => Promise<void>;
   lastActivity: number; // 用于 idle 回收：非优雅断开时 onclose 不触发，靠这个扫掉僵尸 session
+}
+
+/**
+ * 一个 HTTP 会话背后要挂的东西：一份独立的 McpServer + 释放它的办法。
+ * 直连模式和 hub 模式各给一个工厂，HTTP 会话管理这一层是共用的。
+ */
+interface HttpServeSpec {
+  /** health 里显示、日志里带的名字 */
+  name: string;
+  /** 默认空闲回收阈值（毫秒），0 = 不回收；--idle-min 可覆盖 */
+  defaultIdleMs: number;
+  makeServer: () => { server: McpServer; close: () => Promise<void> };
 }
 
 function isInitializeRequest(body: unknown): boolean {
@@ -107,13 +129,16 @@ function isInitializeRequest(body: unknown): boolean {
 
 /**
  * 启动 HTTP MCP 服务器（stateful 模式，SDK canonical pattern）
- * - 每个 initialize 请求新建一个 Session（独立 McpServer + SSHManager + transport）
+ * - 每个 initialize 请求新建一个 Session（独立 McpServer + transport + 该模式的独占资源）
  * - 后续请求通过 Mcp-Session-Id header 路由到对应 session
  * - DELETE /mcp 带 session-id 清理 session
- * - SSHManager 状态随 session 保持（一个 VPS Claude Code 连一个 mac daemon，即一个 session）
+ * - 会话状态随 session 保持：直连模式是 SSHManager（一个 Claude Code 连一个 mac daemon）；
+ *   hub 模式是「当前 node + 到各 node 的下游连接」（一个 Claude Code 会话 = 一份 HubClientManager）
  */
-async function startHttpServer(opts: HttpOptions): Promise<void> {
+async function serveHttp(opts: HttpOptions, spec: HttpServeSpec): Promise<void> {
   const sessions = new Map<string, Session>();
+  const startedAt = Date.now();
+  const idleMs = opts.idleMin !== undefined ? opts.idleMin * 60 * 1000 : spec.defaultIdleMs;
 
   const readBody = (req: IncomingMessage): Promise<string> =>
     new Promise((resolve, reject) => {
@@ -148,8 +173,11 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           ok: true,
-          name: "ssh-mcp-server",
+          name: spec.name,
+          version: PKG_VERSION,
           activeSessions: sessions.size,
+          uptimeSec: Math.round((Date.now() - startedAt) / 1000),
+          idleReapMin: idleMs > 0 ? idleMs / 60000 : 0,
         }));
         return;
       }
@@ -188,30 +216,34 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
       if (sessionId && sessions.has(sessionId)) {
         session = sessions.get(sessionId);
       } else if (req.method === "POST" && isInitializeRequest(parsedBody)) {
-        const { server, sshManager } = buildServer();
+        const { server, close } = spec.makeServer();
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid: string) => {
-            const sess: Session = { transport, server, sshManager, lastActivity: Date.now() };
+            const sess: Session = { transport, server, close, lastActivity: Date.now() };
             sessions.set(sid, sess);
-            console.error(`[mcp-ssh-pty] session opened: ${sid} (active=${sessions.size})`);
+            console.error(`[mcp-ssh-pty:${spec.name}] session opened: ${sid} (active=${sessions.size})`);
           },
         });
         transport.onclose = () => {
           const sid = transport.sessionId;
           if (sid && sessions.has(sid)) {
             sessions.delete(sid);
-            sshManager.disconnect().catch(() => {});
-            console.error(`[mcp-ssh-pty] session closed: ${sid} (active=${sessions.size})`);
+            close().catch(() => {});
+            console.error(`[mcp-ssh-pty:${spec.name}] session closed: ${sid} (active=${sessions.size})`);
           }
         };
         await server.connect(transport);
-        session = { transport, server, sshManager, lastActivity: Date.now() };
+        session = { transport, server, close, lastActivity: Date.now() };
       } else {
-        res.writeHead(400, { "Content-Type": "application/json" });
+        // 规范：带了 session id 但服务端不认识 → 404，客户端应重新 initialize
+        // （守护进程重启、或空闲会话被回收之后就是这种情况）
+        res.writeHead(sessionId ? 404 : 400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
-          error: "bad_request",
-          message: "missing or invalid Mcp-Session-Id; initialize first",
+          error: sessionId ? "session_not_found" : "bad_request",
+          message: sessionId
+            ? "unknown Mcp-Session-Id (daemon restarted or session reaped); re-initialize"
+            : "missing Mcp-Session-Id; initialize first",
         }));
         return;
       }
@@ -233,30 +265,34 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
 
   httpServer.listen(opts.port, opts.host, () => {
     const authNote = opts.token ? " (bearer auth enabled)" : " (no auth — bind to loopback recommended)";
-    console.error(`[mcp-ssh-pty] HTTP listening on http://${opts.host}:${opts.port}/mcp${authNote}`);
+    const reapNote = idleMs > 0 ? `, idle reap ${idleMs / 60000}min` : ", no idle reap";
+    console.error(`[mcp-ssh-pty:${spec.name}] HTTP listening on http://${opts.host}:${opts.port}/mcp${authNote}${reapNote}`);
   });
 
   // 回收 idle session：客户端非优雅断开（Claude 重启 / 反向隧道断）时 transport.onclose
   // 不触发，session 会连同它的 SSHManager 泄漏。定期扫描，关掉久无活动的。
-  const SESSION_IDLE_MS = 30 * 60 * 1000;  // 30 分钟无请求即视为僵尸
+  // 阈值按模式定：直连 daemon 默认 30 分钟；hub 默认 24 小时（Claude 会话经常空半小时以上，
+  // 回收了它下次 ssh 就得重新 initialize；hub 会话本身很小，下游 daemon 有自己的回收）。
   const SESSION_SWEEP_MS = 5 * 60 * 1000;  // 每 5 分钟扫一次
-  const sweepTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [sid, sess] of sessions) {
-      if (now - sess.lastActivity > SESSION_IDLE_MS) {
-        console.error(`[mcp-ssh-pty] reaping idle session ${sid} (idle ${Math.round((now - sess.lastActivity) / 1000)}s, active=${sessions.size})`);
-        sess.transport.close().catch(() => {}); // 触发 onclose → sessions.delete + sshManager.disconnect
-      }
-    }
-  }, SESSION_SWEEP_MS);
-  sweepTimer.unref(); // 别因为这个 timer 拖住进程退出
+  const sweepTimer = idleMs > 0
+    ? setInterval(() => {
+        const now = Date.now();
+        for (const [sid, sess] of sessions) {
+          if (now - sess.lastActivity > idleMs) {
+            console.error(`[mcp-ssh-pty:${spec.name}] reaping idle session ${sid} (idle ${Math.round((now - sess.lastActivity) / 1000)}s, active=${sessions.size})`);
+            sess.transport.close().catch(() => {}); // 触发 onclose → sessions.delete + close()
+          }
+        }
+      }, SESSION_SWEEP_MS)
+    : undefined;
+  sweepTimer?.unref(); // 别因为这个 timer 拖住进程退出
 
   const cleanup = async () => {
-    clearInterval(sweepTimer);
+    if (sweepTimer) clearInterval(sweepTimer);
     await new Promise<void>((r) => httpServer.close(() => r()));
     for (const sess of sessions.values()) {
       await sess.transport.close().catch(() => {});
-      await sess.sshManager.disconnect().catch(() => {});
+      await sess.close().catch(() => {});
     }
     sessions.clear();
     process.exit(0);
@@ -265,8 +301,23 @@ async function startHttpServer(opts: HttpOptions): Promise<void> {
   process.on("SIGTERM", cleanup);
 }
 
+/** 直连模式的 HTTP daemon（跑在每台 mac 上） */
+async function startHttpServer(opts: HttpOptions): Promise<void> {
+  await serveHttp(opts, {
+    name: "ssh-mcp-server",
+    defaultIdleMs: 30 * 60 * 1000,
+    makeServer: () => {
+      const { server, sshManager } = buildServer();
+      return { server, close: () => sshManager.disconnect() };
+    },
+  });
+}
+
 /**
- * 启动 hub 模式（stdio）：对 Claude 只露一个 ssh/sftp，内部按 node 路由到各 mac daemon。
+ * 启动 hub 模式：对 Claude 只露一个 ssh/sftp，内部按 node 路由到各 mac daemon。
+ * - 默认 stdio：一个 Claude 会话起一个 hub 进程（每个约 100M）。
+ * - 加 --http：一个常驻 hub 守护进程服务所有 Claude 会话；每个 MCP 会话各自一份
+ *   HubClientManager（当前 node + 下游连接），互不串台。VPS 上多个会话共用时省下 N-1 个进程。
  */
 async function startHubServer(argv: string[]): Promise<void> {
   const getArg = (name: string): string | undefined => {
@@ -276,13 +327,27 @@ async function startHubServer(argv: string[]): Promise<void> {
   };
 
   const cfg = loadHubConfig(getArg("--hub-config"));
+  const nodeNames = cfg.nodes.map((n) => n.name).join(", ");
+
+  const httpOpts = parseHttpOptions(argv);
+  if (httpOpts) {
+    console.error(`[mcp-ssh-pty:ssh-hub] hub mode (http): ${cfg.nodes.length} node(s): ${nodeNames}`);
+    await serveHttp(httpOpts, {
+      name: "ssh-hub",
+      defaultIdleMs: 24 * 60 * 60 * 1000,
+      makeServer: () => {
+        const mgr = new HubClientManager(cfg.nodes, PKG_VERSION);
+        return { server: buildHubServer(mgr, PKG_VERSION), close: () => mgr.closeAll() };
+      },
+    });
+    return;
+  }
+
   const mgr = new HubClientManager(cfg.nodes, PKG_VERSION);
   const server = buildHubServer(mgr, PKG_VERSION);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(
-    `[mcp-ssh-pty] hub mode: ${cfg.nodes.length} node(s): ${cfg.nodes.map((n) => n.name).join(", ")}`
-  );
+  console.error(`[mcp-ssh-pty] hub mode: ${cfg.nodes.length} node(s): ${nodeNames}`);
 
   const cleanup = async () => {
     await mgr.closeAll().catch(() => {});
