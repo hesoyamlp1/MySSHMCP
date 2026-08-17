@@ -1,0 +1,19 @@
+docs/browser-hub.md
+  s_6c51bb9c0b9069::t_1d8ace7874b71f 3-6,346-429
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "012f92900092395b8fb762d606a968fc33143cf8",
+  "prompts": {},
+  "sessions": {
+    "s_6c51bb9c0b9069": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "31cbb96b-58f2-401a-9c01-3870fa37df72",
+        "model": "unknown"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
