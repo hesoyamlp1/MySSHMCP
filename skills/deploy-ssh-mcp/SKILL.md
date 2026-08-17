@@ -1,284 +1,305 @@
 ---
 name: deploy-ssh-mcp
-description: "Use this skill when deploying / extending the multi-mac ssh-hub setup, or debugging it. Architecture: ONE `ssh-hub` MCP on the VPS (`mcp-ssh-pty --hub`, reads ~/.mori/ssh/hub.json) fans out to many nodes — the VPS itself (in-process) plus each mac running an `--http` daemon exposed over its reverse tunnel on a DISTINCT VPS port. Triggers: 'add a mac to ssh-hub / 加一台 mac', 'setup mcp-ssh-pty hub', 'new mac daemon', 'node online false / mac 连不上 / list 离线', 'two macs only one works / 反向隧道端口冲突', 'mac mcp daemon failed / EADDRINUSE 27777', 'connect local broken on mac', 'VSCode grabbed port 27777', 'switch / migrate mac', 'register ssh-hub'. Each mac node = the `--http` daemon deploy (launchd, token, sshd-loopback); the hub layer = hub.json + distinct ports + register ssh-hub."
+description: "部署、扩展、排查这套多机 hub：VPS 上两个常驻服务(ssh-hub 27790 / browser-hub 27791，都是 mcp-ssh-pty，读同一份 ~/.mori/ssh/hub.json)分发到各台机器。触发：'加一台机器到 ssh-hub / browser-hub'、'node online false / 连不上 / list 显示离线'、'反向隧道端口冲突 / EADDRINUSE 27777'、'daemon 起不来 / connect local 坏了'、'换机 / 迁移 / 注册 hub'、'发新版 / npm publish / rollout 升级'、'某台跑的版本不对 / 改了配置没生效'。只是给某台机器加快捷命令用 ssh-hub-shortcuts；隧道抖动和链路健康用 ssh-hub-link-health。"
 ---
 
-# Deploy: ssh-hub (one MCP) + per-mac `--http` daemons
+# 部署 ssh-hub / browser-hub
 
-## Architecture (hub model)
+本文件写**怎么装、怎么加机器、怎么发版、坏了怎么查**。日常用法在工具描述里，不在这。
+隧道反复抖动、错误率、ProxyJump 那类**运行时链路健康**问题看 skill `ssh-hub-link-health`。
 
-Claude Code runs on the VPS and registers **one** MCP: `ssh-hub` (`mcp-ssh-pty --hub`). It reads `~/.mori/ssh/hub.json` and routes to nodes. Each mac still runs its own `--http` daemon (closest to its LAN); the VPS joins as an in-process node.
+---
+
+## 一、当前架构（2026-08-17）
+
+VPS 上跑两个 systemd 常驻服务，都是同一个包 `@mori-mori/mcp-ssh-pty` 的不同模式，读同一份
+`~/.mori/ssh/hub.json`：
 
 ```
-Claude Code (VPS)
-  └─ ssh-hub (stdio) = mcp-ssh-pty --hub  →  ~/.mori/ssh/hub.json
-       ├─ in-process 直连           → vps          (VPS 本机 shell)
-       ├─ http://127.0.0.1:27778/mcp → macbook-air  (公司)
-       ├─ http://127.0.0.1:27779/mcp → mac-mini-1   (公司常驻)
-       └─ http://127.0.0.1:27780/mcp → mac-mini-2   (家里)
-
-mac daemon 本地都听 27777；反向隧道把它错开暴露到 VPS 不同端口：
-  macbook-air ~/.ssh/config: RemoteForward 27778 localhost:27777
-  mac-mini-1  ~/.ssh/config: RemoteForward 27779 localhost:27777
-  mac-mini-2  ~/.ssh/config: RemoteForward 27780 localhost:27777
-（27777 不再分配给任何 hub node —— 历史上是 ssh-mac 单活/施工入口，现已退役、永久留空）
+Claude Code / codex (VPS)          MCP 地址固定，不用 /mcp 重连
+  ├─ ssh-hub      http://127.0.0.1:27790/mcp   (systemd ssh-hub.service,     --hub --http)
+  │    ├─ vps              in-process ─────── VPS 本机 shell
+  │    │     └─ 它下面还挂着三台没有自己 daemon 的机器（ssh-servers.json）：
+  │    │        windows-4070ti(经 2201 反向隧道) / 野草云美国 / 搬瓦工
+  │    ├─ macbook-air      http://127.0.0.1:27778/mcp   公司·主力
+  │    ├─ mac-mini-1       http://127.0.0.1:27779/mcp   公司·备用
+  │    ├─ mac-mini-2       http://127.0.0.1:27780/mcp   家里
+  │    └─ windows-4070ti   占位 url（见第五节，它没有 ssh daemon，list 里永远离线是正常的）
+  │
+  └─ browser-hub  http://127.0.0.1:27791/mcp   (systemd browser-hub.service, --browser-hub --http)
+       ├─ macbook-air      http://127.0.0.1:27781/mcp → 该机 loopback 8930 → chromium
+       ├─ mac-mini-2       http://127.0.0.1:27783/mcp
+       ├─ windows-4070ti   http://127.0.0.1:27784/mcp
+       └─ mac-mini-1       27782 预留，还没铺
 ```
 
-**两层寻址**：hub 的 `node` 参数选哪台机器；现有的 `server` 参数选该机器内部哪台（local / 它的内网机）。
+**两层寻址**：`node` 选哪台机器，`server` 选该机器内部哪台（`local` = 那台本机 / 它能直连的内网机）。
 
-**为什么**：一条注册管全部；每台 mac 仍是自己的 daemon 干活 → 一跳 sftp、本地直连、各自 notes/shortcuts；多台 mac 的 PTY 可同时活着（各自独立下游连接）；`list` 逐 node 探活显示 online。
+**为什么这么分**：一条 MCP 注册管全部；每台机器仍是自己的 daemon 干活 → 一跳 sftp、本地直连、
+各自的 notes/shortcuts；多台的 PTY 可同时活着；`list` 逐 node 探活显示 online。
 
-## 端口纪律（核心，否则只能连一台）
+---
 
-VPS 上一个端口只能被一条反向隧道绑定。每台 mac 的 daemon **本地都用 27777**（plist/防抢逻辑不用每台改），错开的是**反向隧道暴露到 VPS 的端口**：
+## 二、端口纪律（弄错了就只能连一台）
 
-| 机器 | 位置 | hub.json url | RemoteForward（Host vircs） |
+VPS 上一个端口只能被一条反向隧道绑定。每台机器的 **ssh daemon 本地统一听 27777**、
+**playwright 本地统一听 8930**（不用每台改），错开的是**反向隧道暴露到 VPS 的端口**：
+
+| 机器 | ssh daemon → VPS | browser → VPS | 备注 |
 |---|---|---|---|
-| macbook-air | 公司 | `http://127.0.0.1:27778/mcp` | `27778 localhost:27777` |
-| mac-mini-1 | 公司常驻 | `http://127.0.0.1:27779/mcp` | `27779 localhost:27777` |
-| mac-mini-2 | 家 | `http://127.0.0.1:27780/mcp` | `27780 localhost:27777` |
+| macbook-air | 27778 | 27781 | 公司主力；另提供公司 git 9022 |
+| mac-mini-1 | 27779 | 27782（预留未铺） | 公司备用；git 隧道已停 |
+| mac-mini-2 | 27780 | 27783 | 家里 |
+| windows-4070ti | 无（经 vps 节点的 2201） | 27784 | 只有浏览器，没有 ssh daemon |
+| — | **27777 永久留空** | — | 历史上是 ssh-mac 单活入口，已退役 |
+| VPS 自己 | 27790 = ssh-hub | 27791 = browser-hub | 只绑回环 |
 
-约定：**27777 永久保留**（历史上是 ssh-mac 单活/施工入口，已退役、留空），hub 端口从 27778 顺延（加新机取 27781、27782…）。两台写同一个 VPS 端口 → 第二台静默失败（`remote port forwarding failed for listen port …`）= 「只能连一台」的根因。
+加新机器：ssh 端口从 27785 往后取，browser 端口同理，别碰上面这些。
+两台写同一个 VPS 端口 → 第二台静默失败（`remote port forwarding failed for listen port …`），
+表现就是「两台只有一台能用」。
 
-### 共享端口（公司 git 9022 / 2222 退役）
-- **9022 = 公司内网 git 反向隧道**：VPS `9022 → 公司 git 10.176.201.75:22`，让 VPS 经在线的 mac 跳板访问公司 git（VPS `~/.ssh/config` 的 `company-git` 别名 = `localhost:9022`）。⚠️ **GitLab 正确 IP 是 `10.176.201.75`，不是 `10.12.3.198`**（后者 `nc` 通但 SSH 即 `Connection closed`，不是 GitLab——2026-06-22 macbook-air 的 git-tunnel.sh 就因写成 10.12.3.198 而服务不了 git，排查了半天）。两台写 `-R 127.0.0.1:9022:10.176.201.75:22`。**macbook-air + mac-mini-1 同口 9022 互备**，谁在线谁顶；**当前主 = macbook-air**（mac-mini-1 曾抽风，其 git-tunnel 已停，见 [[company-git-access]] memory）。⚠️ 这两台 vircs 块**必须去掉 `ExitOnForwardFailure yes`**——否则第二台连接时 9022 撞会被拦死整条 SSH（典型症状：开第二台 mac 时它整个连不上 VPS）。家里的 mac-mini-2 够不到公司内网，**不配 9022**。
-- **2222（已退役）**：旧 ssh-mac 时代 VPS `2222 → mac:22`（反连 mac sshd），hub daemon 取代后各台都删了。
-
-## hub.json（VPS，含 token，chmod 600）
-
-`~/.mori/ssh/hub.json`（模板见仓库 `hub.example.json`）：
-
-```json
-{ "nodes": [
-  { "name": "vps", "local": true, "note": "VPS 入口：git/日志/轻量脚本" },
-  { "name": "macbook-air", "url": "http://127.0.0.1:27778/mcp", "token": "<同该 mac MCP_HTTP_TOKEN>", "note": "工作主力机（公司）" },
-  { "name": "mac-mini-1",  "url": "http://127.0.0.1:27779/mcp", "token": "<同该 mac MCP_HTTP_TOKEN>", "note": "公司常驻；提供公司 git 9022" },
-  { "name": "mac-mini-2",  "url": "http://127.0.0.1:27780/mcp", "token": "<同该 mac MCP_HTTP_TOKEN>", "note": "家里机" }
-] }
-```
-
-- `local:true` 的节点是 VPS 自己（in-process，不用起 daemon）。
-- 远程节点的 `token` 必须与那台 mac daemon 的 `MCP_HTTP_TOKEN` 一致（多台可共用同一个 token）。
-- `note`（可选）：节点简短标注，`ssh({action:"list"})` 总览直接显示（离线也显示）；每台 mac 的详细运维备注另走该 mac 的 local note（`ssh({node, action:"notes", server:"local", content})`）。
-
-## 注册 ssh-hub（VPS）
-
-```bash
-claude mcp add ssh-hub -- mcp-ssh-pty --hub
-# 开发期指向源码：claude mcp add ssh-hub -- node /path/to/MySSHMCP/dist/index.js --hub
-claude mcp list | grep ssh-hub   # ✓ Connected
-```
-
-> MCP 工具在会话启动时加载：注册后要**新开会话**才看得到 `ssh-hub__ssh` / `ssh-hub__sftp`。
-
-### 可选：hub 常驻守护进程（`--hub --http`，v2.7.0 起）
-
-默认 stdio 注册 = 每个 Claude 会话一个 hub 进程（约 100M/个）。VPS 上开多个会话时改成一个常驻守护进程共用：
-
-```bash
-# systemd（VPS）：/etc/systemd/system/ssh-hub.service
-#   ExecStart=/usr/bin/mcp-ssh-pty --hub --http --port 27790 --host 127.0.0.1 --token <secret>
-#   Restart=always   User=root   Environment=HOME=/root
-# 端口纪律：27777 留空、27778~27780 是三台 mac 的隧道；hub 守护进程用 27790，只绑回环。
-claude mcp remove ssh-hub
-claude mcp add --transport http ssh-hub http://127.0.0.1:27790/mcp --header "Authorization: Bearer <secret>"
-curl -s http://127.0.0.1:27790/health        # activeSessions 应等于连着的会话数
-```
-
-- 每个 MCP 会话各自一份 HubClientManager（当前 node + 下游连接），互不串台；空闲 24h 才回收（`--idle-min` 可调，0 不回收）。
-- **重启守护进程 = 所有会话的 ssh-hub 都要 `/mcp` 重连**（服务端对旧 session 回 404）。发新版前先想好时机；不想受影响的会话继续用 stdio 注册即可，两种可以并存。
-- 守护进程必须跑 npm 发布版（`/usr/bin/mcp-ssh-pty`），不许指向仓库 dist（见 memory：别覆盖已发布的全局包）。
-- **配置改动的生效方式变了（常驻化的代价）**：
-  - `hub.json`（node 列表、note）是守护进程**启动时读一次、整进程生命周期缓存**。改了必须 `systemctl restart ssh-hub` —— 这会让所有连着的会话回 404、要各自 `/mcp` 重连。
-  - vps 节点的 `ssh-servers.json`（vps 内部的 server 列表）是**每个 MCP 会话各自读一次**。改了新开的会话就能看到，老会话 `/mcp` 重连即可，不必重启整个服务。
-  - 对比 stdio：stdio 每会话一个进程、启动即读最新，没有这个缓存问题。所以「改了 hub.json 要重启守护进程」是常驻模式独有的一步，别忘。
-
-## 日常使用
-
-```
-ssh({action:"list"})                                  # 所有 node + online + 各 node 的 server 名
-ssh({action:"list", onlineOnly:true})                 # 只列在线 node
-ssh({node:"macbook", action:"connect", server:"local"})   # 连 macbook 本机；之后不带 node 都走它
-ssh({command:"..."})                                  # 在当前 node 当前连接上执行（默认 exec 通道）
-ssh({command:"...", mode:"pty"})                       # 交互式/持久 shell（首次用到才懒开 PTY）
-ssh({node:"mac-mini-1", action:"connect", server:"0.2"})  # 连 mac-mini-1 背后的内网机（该 mac 一跳）
-```
-
-切 node 不影响其它 node 上正在跑的东西（长任务照例丢 tmux）。connect 一个离线 node 会返回「daemon 可能不在线」而非裸 ECONNREFUSED。
-
-> **命令通道（v2.6.0 起）**：默认走 **exec**（无头、一发一收、直接拿 exitCode、输出无需清洗、绝不会被 heredoc/续行符卡死 session）。只有交互式 REPL / TUI(vim/top) / `tail -f`+Ctrl-C / 需保留 cwd 的多步操作才用 `mode:"pty"`（连接时不开 PTY，首次 pty 调用才懒加载）。`signal`/`read`/`reset_shell`/`interactive` 都隐含 pty。
-> **升级到 ≥2.6.0**（exec 默认 + `mode` 参数）：每个 node `npm i -g @mori-mori/mcp-ssh-pty@latest` + `launchctl kickstart -k …`（mac）；**VPS hub 也要升** + `/mcp` 重连——旧 hub 不认识 `mode`、会在入口把它 strip 掉，`mode:"pty"` 就传不到下游 daemon。混版是平滑降级（旧 node 忽略 `mode`、保持 PTY 默认）。
+**共享端口 9022 = 公司内网 git**：VPS `9022 → 公司 GitLab 10.176.201.75:22`，VPS 的
+`company-git` 别名指向 `localhost:9022`。⚠️ GitLab 正确 IP 是 **10.176.201.75**，不是
+10.12.3.198（后者 `nc` 通但 SSH 立刻 `Connection closed`，2026-06-22 排查过半天）。
+air 和 mini-1 都能提供，**当前主 = macbook-air**，mini-1 的 git-tunnel 已停（避免双机抢占）。
+家里的 mini-2 够不到公司内网，不配这条。
+⚠️ 提供 9022 的机器，`vircs` 块里**必须去掉 `ExitOnForwardFailure yes`**——否则第二台连接时
+9022 撞车会拦死整条 SSH（症状：开第二台 mac 时它整个连不上 VPS）。
 
 ---
 
-# 单台 mac node 的部署（`--http` daemon）
+## 三、版本与 rollout（最容易出错的一节）
 
-每个远程 node = 一台 mac 跑 `mcp-ssh-pty --http`。下面是单台 mac 的完整部署（加新 mac 就重复这套，**只改反向隧道端口**）。
-
-## 1. 安装运行时
+**三层版本是独立的，`/health` 报的是「进程启动时加载的代码」，不是磁盘上的包版本**：
 
 ```bash
+npm view @mori-mori/mcp-ssh-pty version                      # npm 上最新
+grep '"version"' /usr/lib/node_modules/@mori-mori/mcp-ssh-pty/package.json   # 本机装的
+for p in 27790 27791 27778 27779 27780; do curl -s http://127.0.0.1:$p/health; echo; done  # 各进程真在跑的
+```
+
+2026-08-17 当天就出现过三层全不一样：npm 2.9.0 / 全局包 2.9.0 / ssh-hub 进程 2.8.0。
+**stdio 模式的 MCP 进程更顽固**：它锁死在会话启动那一刻的代码，覆盖全局包对它完全无效，
+只能重开那个会话。判断某个会话跑的是新是旧，看它的 MCP 进程启动时间和全局包落盘时间谁先谁后：
+
+```bash
+stat -c '%y' /usr/lib/node_modules/@mori-mori/mcp-ssh-pty/dist/index.js   # 包落盘时间
+ps -eo pid,ppid,lstart,args | grep mcp-ssh-pty | grep -v grep             # 各进程启动时间
+```
+
+### 发版链路（跨机只走 git，绝不传文件）
+
+**npm 发布只能在 macbook-air 上做，而且要 2FA 一次性密码**（2026-08-17 实测：VPS 上根本没有
+`~/.npmrc`；mac-mini-1 和 mac-mini-2 有但 token 已失效，`npm whoami` 报 401；只有 air 有效）。
+
+```bash
+# 1. VPS：改源码 → bump package.json → commit → push
+npm version <x.y.z> --no-git-tag-version && npm run build   # build 只为本地验证，dist 是 gitignore 的
+git add src docs package.json package-lock.json && git commit -m "..." && git push origin HEAD:main
+
+# 2. air：拉代码 + 发布（注意大小写：air 是 ~/Passion，mini-2 是 ~/passion）
+ssh({node:"macbook-air", server:"local", command:"cd ~/Passion/MySSHMCP && git fetch origin && git merge --ff-only origin/main"})
+ssh({node:"macbook-air", server:"local", command:"cd ~/Passion/MySSHMCP && npm publish --otp=<6位码>"})
+#    不带 --otp 会报 EOTP。码 30 秒过期，拿到就立刻跑。prepublishOnly 会自动 build。
+
+# 3. rollout：每台升包 + 重启进程（升包不重启进程等于没升）
+npm i -g @mori-mori/mcp-ssh-pty@latest
+launchctl kickstart -k gui/$(id -u)/com.mori.mcp-ssh-pty-http    # 各 mac
+systemctl restart ssh-hub browser-hub                            # VPS
+```
+
+⚠️ **VPS 上禁止 `npm install -g .` / `npm link` 覆盖全局包**——全局 bin 必须是 npm 发布版。
+改完源码要生效就走上面的发布链路，没有捷径。
+
+⚠️ **重启 ssh-hub = 所有会话的 ssh-hub 都要 `/mcp` 重连**（服务端对旧 session 回 404）。
+挑时机，别在别人跑着长任务时来。browser-hub 重启影响小（它的会话是按需建的）。
+
+⚠️ **`kickstart -k` 会杀掉 daemon 进程组里的所有后台进程**。经 exec 通道用 `nohup` 起的后台任务，
+即使被 launchd 收养（`ppid=1`），进程组仍是 daemon 那个，照样被带走——判据看 PGID/SESS 不是 PPID。
+所以**升级任何一台的 daemon 前，先确认那台没有别的会话留的后台长任务**（2026-08-17 一次 rollout
+误杀过别的会话的探测进程）。长任务本来就该用 tmux 起，见下。
+
+### 长任务一律 tmux
+
+```bash
+mkdir -p ~/.mori/jobs && tmux new -d -s job-<名> '<命令> > ~/.mori/jobs/<名>.log 2>&1; echo rc=$? > ~/.mori/jobs/<名>.status'
+```
+
+`cat ~/.mori/jobs/<名>.status` 判断完没完（文件不存在 = 还在跑）。**别用 nohup / disown / 结尾 &**，
+理由同上。`timeout` 上限 300 秒，而且超时只是我们不再等——远端进程还在跑（OpenSSH 的 sshd 不实现
+signal 请求，杀不掉），所以超过 5 分钟的活不要靠调大 timeout。
+
+---
+
+## 四、配置生效方式（常驻化的代价）
+
+| 配置 | 谁读 | 改完怎么生效 |
+|---|---|---|
+| `~/.mori/ssh/hub.json`（节点、token、note、browser 段、browserRoutes） | 两个 hub 服务**启动时读一次**，整进程缓存 | `systemctl restart ssh-hub` / `browser-hub`。ssh-hub 重启会让所有会话回 404、各自 `/mcp` 重连 |
+| `~/.mori/ssh/ssh-servers.json`（某台机器内部的 server 列表 / shortcuts） | **每个 MCP 会话各读一次** | 新开会话即生效，老会话 `/mcp` 重连即可，不用重启服务 |
+| 各机 `~/.mori/ssh/notes/<server>.md` | 按需读（`action:"notes"`） | 立即生效 |
+
+hub.json 含 token，`chmod 600`。远程节点的 token 必须与那台机器 daemon 的 `MCP_HTTP_TOKEN`
+一致（多台可以共用同一个）。
+
+### VPS 侧注册（一次性，已完成）
+
+```bash
+source /root/.mori/ssh/hub-http.env
+claude mcp add -s user --transport http ssh-hub     http://127.0.0.1:27790/mcp --header "Authorization: Bearer $MCP_HTTP_TOKEN"
+claude mcp add -s user --transport http browser-hub http://127.0.0.1:27791/mcp --header "Authorization: Bearer $MCP_HTTP_TOKEN"
+```
+
+codex 侧写在 `~/.codex/config.toml`，**注意它不认 `bearer_token` 字段**（报
+`bearer_token is not supported for streamable_http`），要用 `http_headers`：
+
+```toml
+[mcp_servers.ssh-hub]
+url = "http://127.0.0.1:27790/mcp"
+http_headers = { Authorization = "Bearer <token>" }
+```
+
+改完用 `codex mcp get ssh-hub` 验证（能解析且显示 `Auth: Bearer token` 就对）。
+codex 的 MCP 进程跟着它的会话生命周期，改配置对**正在跑的会话不生效**，要新开。
+
+---
+
+## 五、加一台机器
+
+### 5.1 加一台有 ssh daemon 的机器（mac）
+
+```bash
+# 1. 运行时
 npm i -g @mori-mori/mcp-ssh-pty
-cat "$(npm root -g)/@mori-mori/mcp-ssh-pty/package.json" | grep version
-```
 
-## 2. token
+# 2. token（与 VPS hub.json 该 node 一致）
+mkdir -p ~/.mori/ssh && echo '<TOKEN>' > ~/.mori/ssh/http-token && chmod 600 ~/.mori/ssh/http-token
 
-```bash
-mkdir -p ~/.mori/ssh
-echo '<TOKEN>' > ~/.mori/ssh/http-token   # 与 VPS hub.json 该 node 的 token 一致
-chmod 600 ~/.mori/ssh/http-token
-```
-
-## 3. SSH loopback（`connect local` 需要）
-
-mac 的 daemon 由 launchd 托管 → 无 TTY → node-pty 失败，会自动降级为 ssh 连自身 sshd（拿真 PTY）。需要：
-
-```bash
-# a. Remote Login: ON（System Settings → General → Sharing），allowed users 含当前用户
-# b. 自己的 pub key 进 authorized_keys
+# 3. SSH loopback —— connect local 要用（daemon 由 launchd 托管、无 TTY，
+#    node-pty 失败后降级为 ssh 连自身 sshd 拿真 PTY）
+#    a. Remote Login: ON（系统设置 → 通用 → 共享），allowed users 含当前用户
+#    b. 自己的 pub key 进 authorized_keys
 cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-ssh -o BatchMode=yes "$USER"@127.0.0.1 'echo ok'      # 验证
+ssh -o BatchMode=yes "$USER"@127.0.0.1 'echo ok'
+#    c. UTF-8（sshd 不从 daemon env 透传 LANG，缺了中文花屏）
+grep -q '^export LANG=' ~/.zshenv || printf 'export LANG=en_US.UTF-8\nexport LC_ALL=en_US.UTF-8\n' >> ~/.zshenv
 
-# c. UTF-8 locale（sshd 不从 daemon env 透传 LANG，缺了中文回显花屏）
-grep -q '^export LANG=' ~/.zshenv 2>/dev/null || cat >> ~/.zshenv <<'EOF'
-export LANG=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
-EOF
-```
+# 4. 反向隧道：独立 launchd 服务，走 vircs-tunnel 别名
+#    ~/.mori/ssh/hub-tunnel.sh: ssh -N -R <本机分配的口>:127.0.0.1:27777 vircs-tunnel
+#    ~/Library/LaunchAgents/com.mori.hub-tunnel.plist（KeepAlive + RunAtLoad, ThrottleInterval 15）
 
-## 4. 反向隧道（launchd 常驻，已与 VSCode 解绑）
-
-> 历史：隧道曾写在 `vircs` 块的 RemoteForward 里、寄生在 VSCode Remote-SSH 连接上——VSCode 一关 node 就 offline。现为独立 launchd 服务；`vircs` 块的 RemoteForward 已全部注释（该块留给 VSCode / 手动登录，不带转发）。
-
-- `~/.ssh/config` 加专用别名 **`vircs-tunnel`**：连接参数同 vircs（HostName / ProxyCommand / IdentityFile），**不含任何 RemoteForward**，带 `ExitOnForwardFailure yes` + `ServerAliveInterval 15` / `ServerAliveCountMax 3`。转发由各脚本命令行 `-R` 显式给。
-- 每台两个 launchd job（KeepAlive + RunAtLoad）：
-  - `com.mori.hub-tunnel` → `~/.mori/ssh/hub-tunnel.sh`：`ssh -N -R <唯一口>:127.0.0.1:27777 vircs-tunnel`（air=27778 / mini1=27779 / mini2=27780），ThrottleInterval 15
-  - `com.mori.git-tunnel` → `~/.mori/ssh/git-tunnel.sh`：`ssh -N -R 127.0.0.1:9022:10.176.201.75:22 vircs-tunnel`（GitLab 正确 IP=10.176.201.75，**别用 10.12.3.198**；仅够得到公司网的 air+mini1；mini2 不跑），ThrottleInterval 60
-- 脚本开头**等代理出网**再连：`for i in $(seq 30); do nc -z 127.0.0.1 <Clash口> && break; sleep 2; done`（air/mini1=7890、mini2=7897）。id_rsa 必须**免密**（launchd 无 ssh-agent）。
-- **为何 hub / git 拆两条连接**：ExitOnForwardFailure 是连接级。hub 口每台唯一 → 可严格（失败即退、launchd ~15s 重试自愈）；9022 双机共享互备 → 撞了只让 git-tunnel 自己重试，不连累 hub。塞同一条连接 = 第二台的 9022 撞死整条 SSH（血泪）。
-- **无人值守注意**：这俩是 `gui/<uid>` LaunchAgent，**用户 GUI 登录后才起**。要"重启自愈"必须开自动登录 + Clash 设为登录项（mini2 实测没开自动登录 → 重启卡锁屏、隧道全不起）。
-
-## 5. ssh-servers.json（这台 mac 自己的内网拓扑）
-
-`~/.mori/ssh/ssh-servers.json` —— 这台 mac 能直连的内网机 + 它的 shortcuts/hints/notes。模板见 `ssh-servers.example.json`。
-
-## 6. launchd plist（带 VSCode 抢端口的自动 kill）
-
-VSCode Remote-SSH 启动会随机抢高位端口（含 27777）→ daemon EADDRINUSE。plist 的 wrapper 检测 `lsof -tiTCP:27777`，是 Code Helper/Electron 就 kill 再 exec daemon。模板：`templates/com.mori.mcp-ssh-pty-http.plist.template`；自动化：`scripts/migrate-mac1.sh`（探测 nvm node 路径，每台不同）。
-
-- plist `EnvironmentVariables` 必须含 `LANG`/`LC_ALL=en_US.UTF-8`，否则 `connect local` 起的 zsh 中文 mojibake。
-- daemon 本地端口保持 27777（不用每台改）。
-
-```bash
+# 5. daemon 的 launchd plist（模板见仓库 templates/）
 launchctl load ~/Library/LaunchAgents/com.mori.mcp-ssh-pty-http.plist
 launchctl list | grep mcp-ssh        # pid 非零 + exit=0 = 健康
 ```
 
-## 7. per-mac drift checklist（换机/新机逐项过）
+然后 VPS 的 hub.json 加一条 node，`systemctl restart ssh-hub`。
+
+**逐项过一遍（换机/新机每台都不一样的东西）**：
 
 | 项 | 怎么取 | 落到哪 |
 |---|---|---|
-| Node 路径 | `which node`（nvm 每台不同） | plist `ProgramArguments` |
-| 用户名 / `$HOME` | `id -un` / `$HOME` | plist HOME/路径 |
-| SSH keypair（每台单独一把） | 这台的 `~/.ssh/id_ed25519` | (a) 本机 authorized_keys（loopback）(b) GitHub（git pull 走 SSH） |
-| Token | 与 VPS hub.json 该 node 一致 | `~/.mori/ssh/http-token` 600 |
-| **反向隧道端口** | **按端口表错开** | `~/.mori/ssh/hub-tunnel.sh` 的 `-R` 参数（launchd job，见第 4 节） |
-| Clash 代理口 | 每台可能不同（air/mini1=7890、mini2=7897） | hub/git-tunnel.sh 开头的 `nc -z` 门控 |
-| LANG/LC_ALL | 固定 `en_US.UTF-8` | plist EnvironmentVariables + `~/.zshenv` |
-| sshd | Remote Login ON, 含当前用户 | 关了 loopback / VPS→mac 都 ECONNRESET |
+| node 路径 | `which node`（nvm 每台不同） | plist `ProgramArguments` |
+| 用户名 / `$HOME` | `id -un` / `$HOME` | plist |
+| SSH keypair（每台一把） | 该机 `~/.ssh/id_ed25519` | 本机 authorized_keys + GitHub |
+| token | 与 hub.json 一致 | `~/.mori/ssh/http-token` 600 |
+| **反向隧道端口** | **按第二节的表错开** | `hub-tunnel.sh` 的 `-R` |
+| Clash 代理口 | air/mini-1 = 7890、mini-2 = 7897 | 隧道脚本开头的 `nc -z` 门控 |
+| LANG/LC_ALL | `en_US.UTF-8` | plist `EnvironmentVariables` + `~/.zshenv` |
+| sshd | Remote Login ON | 关了则 loopback 和 VPS→该机都 ECONNRESET |
 
-## kickstart vs bootout
+**隧道为什么拆成独立 launchd 服务**：`ExitOnForwardFailure` 是连接级的。hub 口每台唯一 →
+可以严格（失败即退、launchd ~15s 重试自愈）；9022 是双机共享的 → 撞了只让 git-tunnel 自己重试，
+不连累 hub。塞进同一条连接 = 第二台的 9022 撞死整条 SSH。
+隧道脚本开头要**等代理出网再连**：`for i in $(seq 30); do nc -z 127.0.0.1 <Clash口> && break; sleep 2; done`。
+key 必须免密（launchd 里没有 ssh-agent）。
+⚠️ 这些是 `gui/<uid>` LaunchAgent，**用户 GUI 登录后才起**。要「重启自愈」必须开自动登录 +
+Clash 设为登录项（mini-2 实测没开自动登录 → 重启后卡锁屏、隧道全不起）。
+
+### 5.2 加一台只有浏览器、没有 ssh daemon 的机器（windows-4070ti 这种）
+
+当前 hub.json 里的写法是**临时的**：给它一条 node、`url` 填占位
+`http://127.0.0.1:1/mcp`，只为让 browser-hub 认出这个浏览器节点。代价是它在
+`ssh({action:"list"})` 里**永远显示离线**——这是正常的，不是故障。
+要在它上面跑命令走 `ssh({node:"vps", server:"windows-4070ti"})`（经它自建的反向隧道 2201）。
+
+代码里（commit b670f29，**随 2.9.2 发布，npm 上还没有**）已经支持更干净的写法：顶层
+`browserNodes` + `via`/`server` 指定「在哪个 ssh node 上执行 up/down」。发版之后把 windows
+那条从 `nodes` 挪到 `browserNodes`，加 `via:"vps"` + `server:"windows-4070ti"`，
+它就不再污染 ssh 的节点清单。
+
+### 5.3 给一台机器铺浏览器
 
 ```bash
-# 改了 ssh-servers.json / 升级 npm 包：重启进程即可
-launchctl kickstart -k gui/$(id -u)/com.mori.mcp-ssh-pty-http
-# 改了 plist 本身（env/args/KeepAlive）：必须 bootout + bootstrap，否则缓存定义不刷新
-PLIST=~/Library/LaunchAgents/com.mori.mcp-ssh-pty-http.plist
-launchctl bootout gui/$(id -u) "$PLIST"; launchctl bootstrap gui/$(id -u) "$PLIST"
+# 该机器上
+npm i -g @playwright/mcp@latest && npx --yes playwright install chromium
+# 三个脚本从已铺好的机器抄（air 是参照）：
+#   ~/.mori/pw-up.sh   起 daemon（isolated + storage-state，必须 tmux 起，不建隧道）
+#   ~/.mori/pw-down.sh 只停 daemon，不动隧道
+#   ~/.mori/ssh/pw-tunnel.sh + com.mori.pw-tunnel.plist   独立 launchd 服务，端口按表改
 ```
 
-> **⚠️ kickstart -k 会杀掉 daemon 进程组里的所有后台进程。** 经 ssh-hub 的 exec 通道用 `nohup`+disown 起的后台任务，
-> 虽然被 launchd 收养（ppid=1），**进程组仍是 daemon 那个**，`kickstart -k`（向整个进程组发信号）照样把它带走——
-> 判"会不会被 kickstart 杀"看 PGID/SESS，不是 PPID。要活下来得 `setsid` 自成会话，或干脆用 tmux（长任务本就推荐 tmux）。
-> 所以**升级 / kickstart 任何 mac 的 daemon 前，先确认那台没有别的会话留的后台长任务**（2026-08-17 一次 rollout 就误杀过一个别的会话的探测进程）。
+hub.json 给该节点加 `browser` 段（和 ssh 的节点定义共用一份，不用写两遍）：
+
+```json
+"browser": { "url": "http://127.0.0.1:2778x/mcp",
+             "up": "bash ~/.mori/pw-up.sh", "down": "bash ~/.mori/pw-down.sh",
+             "concurrency": 3, "logins": ["..."], "reach": ["公司内网"], "note": "..." }
+```
+
+顶层 `browserRoutes` 是按 URL 选机器的规则。**`fallback` 只能指向已经铺好 `browser` 段的节点**，
+否则 browser-hub 启动即报错。改完 `systemctl restart browser-hub`。
+
+**为什么用 `--isolated --storage-state` 而不是持久 profile**（2026-08-17 实测）：
+持久 profile 是独占的，第二个会话一 navigate 就报 `Browser is already in use`——这才是历史上
+「8930 单活口」的真正原因，不只是端口冲突。`--isolated` 每个 client 一份内存 profile，可以并发，
+配 `--storage-state <json>` 就能既并发又带完整登录态，而且那份 json 只读、谁也弄不脏。
+另外 profile 目录名是**启动参数的指纹**，不显式传 `--user-data-dir` 时参数一改就换一个空 profile
+——这是历史上「登录态老是丢」的根因。
 
 ---
 
-## Troubleshooting
+## 六、排查
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `list` 里某 node `online:false` | 反向隧道没起 / mac 睡了 / daemon 挂了 | VPS `ss -tlnp \| grep <VPS端口>`；空 → 等 launchd KeepAlive 自愈（~15s），不行就 mac 上 `launchctl kickstart -k gui/$(id -u)/com.mori.hub-tunnel`；有监听 → 看 mac daemon |
-| 两台 mac 只连得上一台 | 反向端口撞了 | 每台错开（见端口表），kickstart 各自 hub-tunnel |
-| mac 重启后隧道不回来 | gui LaunchAgent 要登录才起 | 开自动登录 + Clash 设登录项（见第 4 节"无人值守"） |
-| 开第二台 mac 时它**整个**连不上 VPS（历史） | 当年 vircs 块带共享转发（9022）+ `ExitOnForwardFailure yes`，一条 forward 撞了拒整条连接 | 现方案已规避：vircs 块无转发、隧道按口拆成独立 launchd 连接（第 4 节） |
-| `EADDRINUSE 27777` (mcp-http.err) | VSCode 抢了端口 | 用带 auto-kill 的 plist wrapper；`launchctl kickstart -k …` |
-| `connect local` → `posix_spawnp failed` | 旧版无 loopback 兜底 | 升级 npm 包 |
-| `connect local` → ECONNRESET | sshd 拒了 loopback 认证 | 自己 pub key 进 authorized_keys；chmod 600 |
-| hub `connect <node>` → ECONNREFUSED/fetch failed | 该 node daemon 不在线 | 同「online:false」一行 |
-| token 改了 hub 连不上 | hub.json token 与 mac MCP_HTTP_TOKEN 不一致 | 两边对齐 |
-| 中文输出花屏 | 缺 UTF-8 locale | plist EnvironmentVariables + `~/.zshenv` 都要有 |
+| 某 node `online:false` | 隧道没起 / 机器睡了 / daemon 挂了 | VPS `ss -tlnp \| grep <VPS端口>`；空 → 等 launchd 自愈（~15s），不行就那台 `launchctl kickstart -k gui/$(id -u)/com.mori.hub-tunnel`；有监听 → 查该机 daemon |
+| windows-4070ti 一直 offline | **正常**，它没有 ssh daemon（第 5.2 节） | 要跑命令走 `node:"vps", server:"windows-4070ti"` |
+| 两台只连得上一台 | 反向端口撞了 | 按第二节的表错开，各自 kickstart 隧道 |
+| 重启后隧道不回来 | gui LaunchAgent 要登录才起 | 开自动登录 + Clash 设登录项 |
+| `EADDRINUSE 27777` | VSCode Remote-SSH 随机抢高位端口（air 上 VSCode 仍在用） | plist 的 wrapper 会检测 `lsof -tiTCP:27777`、是 Code Helper 就 kill 再 exec；然后 `kickstart -k` |
+| `connect local` → `posix_spawnp failed` | 旧版没有 loopback 兜底 | 升级包 |
+| `connect local` → ECONNRESET | sshd 拒了 loopback 认证 | pub key 进 authorized_keys、chmod 600 |
+| hub `connect <node>` → ECONNREFUSED / fetch failed | 该 node daemon 不在线 | 同第一行 |
+| token 改了连不上 | hub.json 与该机 `MCP_HTTP_TOKEN` 不一致 | 两边对齐，重启 hub |
+| 中文花屏 | 缺 UTF-8 locale | plist `EnvironmentVariables` 和 `~/.zshenv` 都要有 |
+| 改了配置没生效 | 常驻服务启动时读一次 | 见第四节的表 |
+| 某个会话行为跟别人不一样 | 它的 MCP 进程锁在旧版代码 | 见第三节，比对进程启动时间和包落盘时间 |
+| 经隧道 curl playwright 403 | 默认 host 防护 | 起 daemon 加 `--allowed-hosts "*"`（只监听 loopback） |
+| 端点路径 | `/mcp` 是 streamable http | `/sse` 是 legacy，别用 |
+| 隧道「半死」：VPS 侧端口没了、该机 ssh 进程还在 | 连接断了但没到判死时间，launchd 不重拉 | **等一分钟自愈**（判死 60s + Throttle 15s），别去手工折腾 |
 
-## 换机 / 加机
+### 换机 / 下线
 
-- mac 下线：它的 `online` 自动变 `false`，hub 不用改；机器回来后 launchd 隧道自动重连恢复。
-- 加新 mac：跑一遍「单台 mac node 部署」（hub 端口取 27781 起、27777 保留），在 hub.json 加一条 node，VPS 侧无需重启 ssh-hub（下次 list 即探到；已在跑的会话需新开才看到新 server 列表变化）。
-- 永久移除：删 hub.json 里那条 node + bootout 那台的 hub-tunnel / git-tunnel launchd job + 停它的 mcp daemon。
-
-## ssh-mac（旧的单机直连，已退役）
-
-历史上 VPS 还注册过一个 `ssh-mac`（`claude mcp add --transport http ssh-mac http://127.0.0.1:27777/mcp --header "Authorization: Bearer <TOKEN>"`）直连「当前占住 27777 的那台 mac」（单活）。三台 mac 全部接入 hub 后 ssh-mac 已 `claude mcp remove ssh-mac -s user` 退役、27777 留空。需要临时单机直连某台时仍可这样注册（不经 hub），但常态用 hub。
+- 机器下线：`online` 自动变 false，hub 不用改；回来后 launchd 隧道自动重连。
+- 永久移除：删 hub.json 那条 node + `bootout` 那台的隧道 job + 停它的 daemon + 重启 hub。
+- 旧的 `ssh-mac` 单活直连（27777）已退役，`claude mcp remove ssh-mac` 做过了，27777 永久留空。
 
 ---
 
-# Playwright（浏览器跑在 mac，单活；给前端开发用）
+## 七、几条容易踩的
 
-前端开发要驱动浏览器 + 截图，但 VPS 资源不够跑 chromium。解法和 hub **对称**——浏览器跑在 mac、VPS 只当 MCP 客户端。但 playwright 是「天然单机」（一次只在一台机器上开发一个前端），所以用**单活**而非 hub：VPS 一个 playwright 注册、固定端口 **8930**，谁开发谁的 mac 起 daemon 占隧道。
-
-```
-VPS Claude → playwright MCP (http://127.0.0.1:8930/mcp) → 反向隧道 8930 → 那台 mac 的 playwright-mcp → chromium
-```
-截图走 MCP image content 自动回 Claude，不用落地处理。
-
-## 每台 mac 装一份（daemon 按需起）
-
-```bash
-npm i -g @playwright/mcp@latest
-npx --yes playwright install chromium      # 浏览器装过就跳过（mini1/mini2 之前装过）
-```
-- `~/.mori/pw-up.sh`（0755）：`tmux` 起 `playwright-mcp --port 8930 --host 127.0.0.1 --headless --allowed-hosts "*"` → 本地 8930 自检 → `ssh -fN -R 127.0.0.1:8930:127.0.0.1:8930 vircs-tunnel`（stderr 留 `/tmp/pwtunnel.log`）。隧道走 **vircs-tunnel** 别名 = 自带 ExitOnForwardFailure：`-f` 会等转发真建立才后台化，**VPS 8930 被另一台 mac 占着时非零退出、如实报"去那台 pw-down"并收掉本机 daemon**——不会假成功（冲突路径已实测）
-- `~/.mori/pw-down.sh`（0755）：`tmux kill-session -t pwmcp` + `pkill -f 'ssh.*-R.*8930'`
-- ssh-servers.json 的 `localShortcuts` 加 `pw-up`/`pw-down`（command=`bash ~/.mori/pw-{up,down}.sh`），`launchctl kickstart` 生效
-
-## VPS 注册（一次，单活口）
-
-```bash
-claude mcp add -s user --transport http playwright http://127.0.0.1:8930/mcp
-```
-
-## 用法
-
-```
-ssh({node:"<那台>", shortcut:"pw-up"})   # 起 daemon+隧道占 8930
-→ /mcp 重连 playwright                    # 浏览器就在那台跑
-ssh({node:"<那台>", shortcut:"pw-down"})  # 用完释放；换机：down 旧台、up 新台（8930 单活）
-```
-是哪台 = 你在哪台 pw-up 的（ssh-hub 起停显式）。dev server 跟 playwright 放同台、navigate localhost。
-
-## 踩过的坑
-
-| 坑 | 处理 |
-|---|---|
-| **8931（playwright-mcp 默认端口）被 VSCode Code Helper 抢** EADDRINUSE | 用 **8930** |
-| 经隧道 curl playwright 直接 **403**（默认 host 防护） | 起 daemon 加 `--allowed-hosts "*"`（隧道只 localhost，安全） |
-| 端点路径 | **`/mcp`**（streamable http）；`/sse` 是 legacy |
-| 隧道写法 | 走 **`vircs-tunnel`** 别名（无转发 + ExitOnForwardFailure，被占即非零退出）。历史教训：`ClearAllForwardings=yes` 会把命令行 `-R` 一起清掉；在**带转发的 vircs 块**上用 ExitOnForwardFailure 会被共享口撞死——这正是要无转发专用别名的原因。早期裸 `ssh -R ... vircs` 的写法有"假成功"坑（转发静默失败仍报 UP），已废弃 |
-| 诊断脚本里 `timeout` 报 command not found | mac 没有 GNU `timeout` |
-| 想 headed（亲眼看浏览器） | launchd 无 GUI 只能 headless；headed 用 `--cdp-endpoint` 连你手开的 Chrome |
-
-## MCP 生命周期
-
-playwright daemon 没起时，VPS 那个注册显示 `✗ Failed to connect`（不影响别的 MCP、工具 deferred 不占 context）。起 daemon 后 **`/mcp` 手动重连即可，不用重开 session**——Claude Code 没有自动 enable / lazy-connect 机制（v2.1）。
-
-> ⚠️ `kickstart` 下游 mac 的 mcp daemon 后，hub 会短暂断；v2.5.3 起 hub 自动重连（session 失效也触发 drop+重连）。但 `npm i -g` 升级 hub 全局 bin 后，**当前跑的 ssh-hub 进程要 `/mcp` 重连才换新版**。
+- **别拿 macbook-air 访问公网页面**：它的浏览器出口是 `107.140.5.40` = VPS 那个住宅 IP（经 Clash
+  绕回去）。公网走 mac-mini-2（出口是搬瓦工机房 IP）。见 memory `mac-browser-egress-ip`。
+- **公司 skill 的登录态**：`tc-wiki` / `tc-configcenter` / `tc-langfuse` / `jean` / `jean-webshell`
+  的 bootstrap 读的是**持久 profile**（`mcp-chrome-*`），不是 storageState。补登录态用
+  `~/.mori/browser/relogin.sh`（种回持久 profile + 导出 storageState，一次喂两边）。
+- **浏览器隧道别并进 `com.mori.hub-tunnel`**：那条转发的是 ssh daemon，改它要重载服务、
+  会瞬断所有会话正在跑的 ssh 调用。拆成独立的 `com.mori.pw-tunnel`。
+- **隧道走 `vircs-tunnel` 别名，别自己写 `-J banwagong-us`**：裸 SSH 在公司网每小时 :10-:29
+  有 10~30% 失败率。历史教训：`ClearAllForwardings=yes` 会把命令行 `-R` 一起清掉。
+- **`pw-up.sh` 要自己解析 playwright-mcp 绝对路径**：三台装的位置不一样（air 在 homebrew、
+  mini-2 在 nvm），tmux / launchd 的 PATH 不一定带得上。
+- mac 上没有 GNU `timeout`，诊断脚本里别用。
+- 想 headed 看浏览器：launchd 无 GUI 只能 headless，要 headed 走 `relogin.sh start`
+  （它就是 headful，用于人工登 SSO），或 `--cdp-endpoint` 连手开的 Chrome。
