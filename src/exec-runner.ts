@@ -1,5 +1,5 @@
 import { Client } from "ssh2";
-import { spawn } from "child_process";
+import { spawn, execFileSync } from "child_process";
 
 /**
  * 单次 exec 调用的结果。stdout/stderr 都是已 utf-8 解码、已截断（如超限）的字符串。
@@ -23,6 +23,38 @@ export interface ExecOptions {
   timeoutMs?: number;
   /** 单流（stdout/stderr 各自）保留的最大字节，超了就截断并标记 truncated。默认 1MB。 */
   maxBytes?: number;
+  /** 在哪个目录跑（exec 每次是全新 shell、cwd 不持久，用这个省掉 cd x && 前缀）。 */
+  cwd?: string;
+}
+
+/**
+ * 本机 exec 用的 PATH：launchd/systemd 起的 daemon 继承的是最小 PATH（mac 上连 sysctl/brew 都不在），
+ * 这里在**首次用到时抓一次登录 shell 的 $PATH**（source 过 profile，就是终端里看到的那个），
+ * 与当前 process.env.PATH 取并集——既拿到 mac 的原生 PATH，又不丢 systemd unit 里配的（如 git-ai）。
+ * 只付一次、带 4s 超时兜底，绝不进每条命令。
+ */
+let cachedPath: string | null = null;
+function enrichedPath(): string {
+  if (cachedPath !== null) return cachedPath;
+  const base = process.env.PATH ?? "/usr/bin:/bin";
+  let login = "";
+  try {
+    const shell = process.env.SHELL || "/bin/sh";
+    login = execFileSync(shell, ["-lc", 'printf %s "$PATH"'], {
+      timeout: 4000,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    /* 抓不到就只用 base */
+  }
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const dir of `${login}:${base}`.split(":")) {
+    if (dir && !seen.has(dir)) { seen.add(dir); merged.push(dir); }
+  }
+  cachedPath = merged.join(":");
+  return cachedPath;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -42,8 +74,12 @@ export function execRemote(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 
+  const runCommand = options.cwd
+    ? `cd -- '${options.cwd.replace(/'/g, "'\\''")}' && ${command}`
+    : command;
+
   return new Promise<ExecResult>((resolve, reject) => {
-    client.exec(command, (err, stream) => {
+    client.exec(runCommand, (err, stream) => {
       if (err) {
         reject(new Error(`exec 失败: ${err.message}`));
         return;
@@ -146,6 +182,8 @@ export function execLocal(
     try {
       child = spawn(shell, shellArgs, {
         stdio: [hasStdin ? "pipe" : "ignore", "pipe", "pipe"],
+        cwd: options.cwd,
+        env: { ...process.env, PATH: enrichedPath() },
       });
     } catch (e) {
       reject(e instanceof Error ? e : new Error(String(e)));

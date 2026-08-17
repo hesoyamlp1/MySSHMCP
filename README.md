@@ -208,7 +208,19 @@ ssh({ action: "connect", server: "my-server" })  # Remote SSH
 ssh({ command: "ls -la" })                            # 直接回目录列表（真换行）
 ssh({ command: "make test", timeout: 120 })           # 失败时末尾 [exit N] + isError
 ssh({ command: "python3 -", stdin: "print(1+1)" })    # 多行内容喂 stdin（exec 通道）
+ssh({ command: "npm test", cwd: "/repo" })            # 在指定目录跑（省掉 cd x &&；cwd 不跨调用持久）
 ```
+
+**一次性寻址（v2.8.0 起）**：带 `server`（hub 下再带 `node`）跟 `command` 一起，就不用先单独 connect——
+没连就自动连、连着同一台则跳过不重连，一次调用打到目标机；`ssh({command})` 仍沿用当前粘住的连接。
+
+```
+ssh({ command: "uname -a", server: "local" })                    # 直连 daemon 场景：一步到位
+ssh({ node: "mac-mini-2", server: "local", command: "sw_vers" }) # hub 场景：一次调用连 mac 并执行
+```
+
+> exec 通道用的 PATH：daemon 启动时抓一次登录 shell 的 `$PATH`（就是终端里看到的那个）并与自身 PATH 取并集，
+> 所以 mac 上不必再手动 `export PATH` 就能跑 `sysctl` / `brew` 等；只付一次、不进每条命令。
 
 `sftp({action:"read"})` 同样贴近原生 `Read`：带 `cat -n` 行号返回文件内容，不再包 JSON。
 （`connect` / `list` / `status` 这类控制响应仍是结构化 JSON——它们是状态数据，不是命令/文件内容。）

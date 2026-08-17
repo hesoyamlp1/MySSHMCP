@@ -55,14 +55,50 @@ async function runExec(
   sshManager: SSHManager,
   command: string,
   stdin: string | undefined,
-  timeoutMs: number | undefined
+  timeoutMs: number | undefined,
+  cwd?: string
 ): Promise<ExecResult> {
   if (sshManager.isLocal()) {
-    return execLocal(command, { stdin, timeoutMs });
+    return execLocal(command, { stdin, timeoutMs, cwd });
   }
   const client = sshManager.getClient();
   if (!client) throw new Error("SSH Client 不可用（请先连接）");
-  return execRemote(client, command, { stdin, timeoutMs });
+  return execRemote(client, command, { stdin, timeoutMs, cwd });
+}
+
+/**
+ * 一次性寻址的按需连接：带了 server 又要跑命令时，先确保连到它。
+ * 已经连着同一台就直接返回（不重连——连一台 mac 要 1s+）；不同或没连才连。
+ */
+async function ensureConnectedTo(
+  sshManager: SSHManager,
+  configManager: ConfigManager,
+  serverName: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const status = sshManager.getStatus();
+  if (status.connected && status.serverName === serverName) return { ok: true };
+  if (serverName === "local") {
+    await sshManager.connect(LOCAL_SERVER);
+    return { ok: true };
+  }
+  const cfg = configManager.getServer(serverName);
+  if (!cfg) {
+    const available = ["local", ...configManager.listServers().map((s) => s.name)];
+    return { ok: false, error: `服务器 '${serverName}' 不存在。可用服务器: ${available.join(", ")}` };
+  }
+  try {
+    await sshManager.connect(cfg);
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const offlineish = /ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ECONNRESET/i.test(msg);
+    return {
+      ok: false,
+      error: offlineish
+        ? `无法连接 '${serverName}'：${msg}\n该机器可能不在线（反向隧道未连）。用 ssh({ action: "list" }) 看 online。`
+        : `连接 '${serverName}' 失败：${msg}`,
+    };
+  }
 }
 
 /**
@@ -294,7 +330,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
 如输出超过 8000 字符，完整内容会保存到本地文件，仅返回尾部摘要 + 文件路径，可通过 Read/Grep 工具查看。`,
       inputSchema: SSH_INPUT_SHAPE,
     },
-    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun, interactive, raw, stdin, exec, mode, onlineOnly }): Promise<CallToolResult> => {
+    async ({ action, server: serverName, content, command, timeout, read, lines, offset, clear, signal, shortcut, args, dryRun, interactive, raw, stdin, exec, mode, onlineOnly, cwd }): Promise<CallToolResult> => {
       try {
         // 1. 发送信号
         if (signal) {
@@ -433,7 +469,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
           // shortcut 配了 stdin（必须喂 stdin）或解析为 exec 模式：走 exec 通道（绕开 PTY）
           if (split.stdin !== undefined || effMode === "exec") {
             try {
-              const execResult = await runExec(sshManager, split.command, split.stdin, timeoutMs);
+              const execResult = await runExec(sshManager, split.command, split.stdin, timeoutMs, cwd);
               return {
                 content: [{
                   type: "text",
@@ -482,10 +518,17 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
 
         // 3. 执行命令
         if (command) {
+          // 一次性寻址：带了 server 就按需先连（已连同一台则跳过、不重连），一次调用打到目标机
+          if (serverName) {
+            const conn = await ensureConnectedTo(sshManager, configManager, serverName);
+            if (!conn.ok) {
+              return { content: [{ type: "text", text: conn.error }], isError: true };
+            }
+          }
           const status = sshManager.getStatus();
           if (!status.connected) {
             return {
-              content: [{ type: "text", text: "未连接服务器，请先使用 ssh({ action: 'connect', server: '服务器名' }) 连接" }],
+              content: [{ type: "text", text: "未连接服务器，请先使用 ssh({ action: 'connect', server: '服务器名' }) 连接（或 ssh({ node, server, command }) 一步到位）" }],
               isError: true,
             };
           }
@@ -498,7 +541,7 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
           // exec 模式（默认）：独立通道、一发一收、直接拿 exitCode，不碰 PTY shell
           if (effMode === "exec") {
             try {
-              const execResult = await runExec(sshManager, command, stdin, timeoutMs);
+              const execResult = await runExec(sshManager, command, stdin, timeoutMs, cwd);
               return {
                 content: [{
                   type: "text",

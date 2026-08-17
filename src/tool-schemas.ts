@@ -30,6 +30,7 @@ export const SSH_INPUT_SHAPE = {
   mode: z.enum(["exec", "pty"]).optional().describe("执行通道。exec（默认）：一次性、无状态、独立通道，直接拿 stdout/stderr/exitCode，无 PTY 产物、绝不会被 heredoc/续行符卡死——绝大多数命令用它。pty：持久 PTY shell，跨命令继承 cwd/env，用于交互式 REPL、TUI(vim/top/less)、tail -f + Ctrl-C、必须保留 shell 状态的多步操作。signal/read/reset_shell/interactive 都隐含 pty；PTY 在首次 pty 调用时懒加载。⚠️ 仅 pty 模式有 heredoc/未闭合引号→卡 heredoc>/quote> 的风险：pty 下绝不内联 heredoc 或留未闭合引号/反斜杠/行尾管道，多行内容用 sftp.write 或（默认 exec 通道的）stdin。"),
   raw: z.boolean().optional().describe("仅用于 read：返回未清洗的原始 PTY 流（含 ANSI/控制序列），调试用"),
   stdin: z.string().optional().describe("通过 stdin 喂给命令的字面量内容，在 exec 通道（默认）下生效，适合多行 yaml/sql/python（python3 - / kubectl apply -f - / psql / jq）"),
+  cwd: z.string().optional().describe("在哪个目录跑（exec 通道）。exec 每次是全新 shell、cwd 不跨调用持久，用这个省掉 cd x && 前缀，例如 ssh({command:\"npm test\", cwd:\"/repo\"})"),
   exec: z.boolean().optional().describe("已废弃别名，等价 mode:\"exec\"（现已是默认）。新代码请用 mode"),
   onlineOnly: z.boolean().optional().describe("仅用于 list：只返回当前在线（端口探活通过、反向隧道已连）的机器"),
 };
