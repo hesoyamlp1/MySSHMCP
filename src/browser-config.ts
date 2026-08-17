@@ -12,10 +12,18 @@ import { join } from "path";
 export interface BrowserSpec {
   /** 上游 playwright MCP 端点，经反向隧道落在 VPS 的某个端口（每台机器一个不同端口） */
   url: string;
-  /** 拉起 daemon 的命令，经该机器自己的 ssh daemon 执行 */
+  /** 拉起 daemon 的命令 */
   up?: string;
   /** 停掉 daemon 的命令 */
   down?: string;
+  /**
+   * 在哪个 ssh node 上执行 up/down，默认就是本节点自己（三台 mac 都自己跑着 ssh daemon）。
+   * 没有自己的 ssh daemon 的机器填提供通路的那个 node —— 家里那台 windows 挂在 vps 节点
+   * 下面，所以它是 via:"vps" + server:"windows-4070ti"。
+   */
+  via?: string;
+  /** 目标 ssh node 下的 server 名，默认 "local"（= 那台机器本机） */
+  server?: string;
   /** 同一台机器上允许的并发会话数；内存约束下的人工经验值，不是实测容量 */
   concurrency?: number;
   /** 这台机器的 storageState 里有哪些站的登录态——给模型选机器时看的，不参与匹配 */
@@ -59,6 +67,12 @@ interface RawNode {
 
 interface RawConfig {
   nodes?: RawNode[];
+  /**
+   * 只提供浏览器、不提供 ssh daemon 的机器放这里（不能塞进 nodes——ssh-hub 要求
+   * nodes 的每一项有 local 或 url，塞进去会让 ssh-hub 启动失败，也会污染它的机器清单）。
+   * 这类机器靠 browser.via 借别人的通路执行 up/down。
+   */
+  browserNodes?: RawNode[];
   browserRoutes?: BrowserRoute[];
 }
 
@@ -92,11 +106,14 @@ export function loadBrowserConfig(path?: string): BrowserHubConfig {
   }
 
   const nodes: BrowserNode[] = [];
-  for (const n of raw.nodes ?? []) {
-    if (!n.browser) continue; // 没铺浏览器的机器直接跳过，不是错误
-    if (!n.name) throw new Error(`hub 节点缺少 name: ${JSON.stringify(n)}`);
+  const take = (n: RawNode, from: string): void => {
+    if (!n.browser) return; // nodes 里没铺浏览器的机器直接跳过，不是错误
+    if (!n.name) throw new Error(`${from} 里有条目缺少 name: ${JSON.stringify(n)}`);
     if (!n.browser.url) {
       throw new Error(`节点 '${n.name}' 的 browser 段缺少 url（上游 playwright MCP 端点）`);
+    }
+    if (nodes.some((x) => x.name === n.name)) {
+      throw new Error(`节点 '${n.name}' 在 nodes 和 browserNodes 里都有，去掉一处`);
     }
     nodes.push({
       name: n.name,
@@ -105,6 +122,23 @@ export function loadBrowserConfig(path?: string): BrowserHubConfig {
       sshToken: n.token,
       sshLocal: n.local,
     });
+  };
+
+  // 顺序有意义：工具清单取第一个在线节点的，所以想让哪台当"清单基准"就把它放前面。
+  // 各机器的 @playwright/mcp 版本可能不同，清单该取自版本最低那台（它的工具集是子集，
+  // 任何机器都执行得了）。
+  for (const n of raw.nodes ?? []) take(n, "nodes");
+  for (const n of raw.browserNodes ?? []) take(n, "browserNodes");
+
+  for (const n of nodes) {
+    if (!n.browser.up) continue; // 不配 up 的机器（daemon 常驻）不需要执行通路
+    const via = n.browser.via;
+    if (!via && !n.sshUrl && !n.sshLocal) {
+      throw new Error(
+        `节点 '${n.name}' 配了 up 命令，但它既没有自己的 ssh 端点（url），也没写 browser.via。\n` +
+          `没有自己 ssh daemon 的机器要指明借谁的通路，例如 "via": "vps", "server": "${n.name}"。`
+      );
+    }
   }
 
   if (nodes.length === 0) {

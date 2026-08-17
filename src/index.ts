@@ -390,13 +390,19 @@ async function startBrowserHubServer(argv: string[]): Promise<void> {
   const cfg = loadBrowserConfig(getArg("--hub-config"));
   const nodeNames = cfg.nodes.map((n) => n.name).join(", ");
 
-  // 跑 up/down 命令要用各机器的 ssh daemon：把 browser 节点映射回 ssh-hub 的节点形状
-  const sshNodes: HubNode[] = cfg.nodes.map((n) => ({
-    name: n.name,
-    url: n.sshUrl,
-    token: n.sshToken,
-    local: n.sshLocal,
-  }));
+  // 跑 up/down 命令要经某台机器的 ssh daemon。这里用 hub.json 的**全部** ssh 节点，
+  // 不只是那些自己跑浏览器的——因为 browser.via 可能指向一台自己不跑浏览器的机器
+  // （家里那台 windows 没有自己的 ssh daemon，它是 via:"vps" + server:"windows-4070ti"）。
+  let sshNodes: HubNode[];
+  try {
+    sshNodes = loadHubConfig(getArg("--hub-config")).nodes;
+  } catch {
+    // hub.json 里没有可用的 ssh 节点（比如只配了 browserNodes）：退回用 browser 节点自带的端点。
+    // 拉不起远端 daemon 而已，browser-hub 本身照样能跑（daemon 常驻的机器不需要 up）。
+    sshNodes = cfg.nodes
+      .filter((n) => n.sshUrl || n.sshLocal)
+      .map((n) => ({ name: n.name, url: n.sshUrl, token: n.sshToken, local: n.sshLocal }));
+  }
 
   const makeServer = () => {
     const hub = new HubClientManager(sshNodes, PKG_VERSION);

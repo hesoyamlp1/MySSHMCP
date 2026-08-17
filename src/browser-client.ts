@@ -151,21 +151,27 @@ export class BrowserClientManager {
           `手工去那台机器上起，或者在 hub.json 给它加 "up": "bash ~/.mori/pw-up.sh"。`
       );
     }
-    if (!node.sshUrl && !node.sshLocal) {
+    // 在哪执行：默认是这台机器自己的 ssh daemon（三台 mac 都自己跑着一个）。
+    // 没有自己 ssh daemon 的机器靠 via 借通路——家里那台 windows 是 via:"vps" +
+    // server:"windows-4070ti"（它挂在 vps 节点下面）。
+    const via = node.browser.via ?? name;
+    const server = node.browser.server ?? "local";
+    if (!node.browser.via && !node.sshUrl && !node.sshLocal) {
       throw new Error(
-        `${name} 的 daemon 没起，而这个节点没有 ssh 端点（hub.json 里的 url），拉不起来。`
+        `${name} 的 daemon 没起，而这个节点既没有自己的 ssh 端点，也没写 browser.via，拉不起来。`
       );
     }
 
-    // 经该机器自己的 ssh daemon 执行；server:"local" 表示在那台机器本机上跑。
-    // ⚠️ up 脚本必须用 tmux/setsid 起 daemon：ssh daemon 被 launchctl kickstart -k 重启时
-    // 会杀掉自己进程组里的后台进程，nohup 也挡不住（2026-08-17 另一条线实测）。
+    // ⚠️ up 脚本必须让 daemon 脱离当前 session：mac 上用 tmux/setsid（ssh daemon 被
+    // launchctl kickstart -k 重启时会杀掉自己进程组里的后台进程，nohup 挡不住），
+    // windows 上用 WMI 的 Win32_Process.Create（OpenSSH 的 Job Object 会连
+    // Start-Process 起的隐藏进程一起终止）。两处都是 2026-08-17 实测踩出来的。
     let out = "";
     try {
       const r = await this.hub.callTool(
-        name,
+        via,
         "ssh",
-        { server: "local", command: up, timeout: 60 },
+        { server, command: up, timeout: 60 },
         { timeoutMs: 90_000 }
       );
       const c = r.content?.[0];
@@ -203,9 +209,9 @@ export class BrowserClientManager {
       return `${name} 的 browser 段没配 down 命令，只断开了本会话的连接，daemon 还在那台机器上跑着。`;
     }
     const r = await this.hub.callTool(
-      name,
+      node.browser.via ?? name,
       "ssh",
-      { server: "local", command: cmd, timeout: 30 },
+      { server: node.browser.server ?? "local", command: cmd, timeout: 30 },
       { timeoutMs: 60_000 }
     );
     const c = r.content?.[0];
