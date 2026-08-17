@@ -1,6 +1,8 @@
 # browser-hub 设计：远程浏览器统一寻址
 
-状态：**设计稿，待评审**。写于 2026-08-17。
+状态：**已实现，两台机器落地跑通**（macbook-air + mac-mini-2），2026-08-17。
+代码在 `src/browser-*.ts`；实际部署情况、跟本设计的偏差、实测数据都在第十三节。
+下面第一到十二节保持写设计时的原样（它记着当时的判断依据），有出入的地方以第十三节为准。
 一句话：把「浏览器跑在哪台机器」这件事从每次手工操作变成一次寻址，做法跟 ssh-hub 同构，代码大部分是复用。
 
 ---
@@ -266,3 +268,77 @@ await ctx.close();
 - **清理 air 上 9 个残留 profile（约 2GB）**：用户 2026-08-17 明确说先别管。等新方案稳定、有价值的 cookie 都导成 storageState 之后再提，不自己动。
 - **卸掉 VPS 上的 `@playwright/mcp` 0.0.68 + chromium**（约 400M 磁盘）：VPS 既然不跑浏览器，这套就没用了。顺手能省点磁盘（现在 72%），但不在这次范围，也不自己动。
 - **从 mac 上用户日常 Chrome 导 cookie**：技术上可行（mac keychain 解密），比 playwright 自己的 profile 脆，不进主方案。
+
+---
+
+## 十三、落地记录（2026-08-17）
+
+代码已实现并在两台机器上跑通：**macbook-air**（公司内网 + 公司登录态）和 **mac-mini-2**（公网 + 家里内网）。
+
+### 实际装了什么
+
+VPS：
+- `src/browser-config.ts` / `browser-client.ts` / `browser-hub.ts` / `browser-tools-snapshot.ts`（23 个工具的快照，`scripts/gen-tools-snapshot.mjs` 生成）
+- `~/.mori/ssh/hub.json`：air 和 mac-mini-2 各加了 `browser` 段，顶层加了 `browserRoutes` 三条（原文件备份为 `hub.json.bak-20260817-browserhub`）
+
+每台 mac：
+- `~/.mori/pw-up.sh`（新版：isolated + storage-state，不建隧道；旧版备份为 `pw-up.sh.legacy-8930`）
+- `~/.mori/pw-down.sh`（新版：只停 daemon，不动隧道）
+- `~/.mori/ssh/pw-tunnel.sh` + `~/Library/LaunchAgents/com.mori.pw-tunnel.plist`（KeepAlive 常驻）
+- air 另有 `~/.mori/browser/export-state.sh` 和 `~/.mori/browser/state/company.json`（27 个 cookie，权限 600）
+
+### 跟设计稿的四处偏差
+
+1. **隧道是独立的 launchd 服务，没并进 `com.mori.hub-tunnel`。** 原计划往那条 plist 里加一条
+   RemoteForward，但那要重载服务、会瞬断 27778（ssh daemon 的通道），正在跑 ssh 调用的会话会失败。
+   拆成 `com.mori.pw-tunnel` 后，改浏览器隧道跟 ssh 隧道互不影响。
+2. **`pw-up.sh` 自己解析 playwright-mcp 的绝对路径。** 三台装的位置不一样（air 在 homebrew、
+   mini-2 在 nvm），tmux / launchd 的 PATH 不一定带得上。
+3. **公司那条路由暂时没有 fallback。** `fallback` 必须指向已经铺好 browser 段的节点，
+   mac-mini-1 还没铺，所以 `*.17u.cn → macbook-air` 这条现在没有备机。铺完 mini-1 补上。
+4. **VPS 上的 browser-hub 还没常驻。** 需要先 `npm publish`（这个包是 npm 发布版，
+   按纪律不能用 `npm i -g .` 覆盖），再配 systemd。目前是用 worktree 里的 dist 手工起来验证的。
+
+### 一个实测出来的、跟直觉相反的事实
+
+两台 mac 的浏览器公网出口（经 playwright 实测，不是 curl）：
+
+```
+macbook-air →  107.140.5.40   AT&T Gardena      ← 就是 VPS 自己那个住宅 IP（经 Clash）
+mac-mini-2  →  80.251.218.180 IT7 洛杉矶         ← 搬瓦工，机房 IP
+```
+
+"把浏览器搬到 mac 就不占用 VPS 的 IP" 是错的：air 的公网流量经 Clash 回到 VPS 出去，
+所以**用 air 访问公网页面等于用那个住宅 IP 出去**。于是：
+
+- 公司域名走 air 没问题（内网流量不出公网，而且登录态在它上面）。
+- 公网一律走 mac-mini-2 —— 理由不是"家里那台闲"，而是它的出口是机房 IP。
+- 别显式 connect 到 air 之后去访问公网页面。自动路由不会这么干，人工指定才会。
+
+两台的 `browser.note` 已按这个事实改写，`browser_node({action:"list"})` 时能看到。
+细节记在 memory `mac-browser-egress-ip`。
+
+### 验证结果
+
+- **协议层 25 项全通过**：工具透传（24 个，原生 schema 完整）、`browser_node` 各 action、
+  concurrency 记账、自动路由 + fallback、路由说明不重复刷、各种错误路径的信息是否说清了怎么办。
+- **登录态**：经完整链路（VPS → 隧道 27781 → air）访问真实内网页面，
+  `git.17usoft.com` 拿到 `Projects · Dashboard · GitLab`、`wiki.17u.cn` 拿到 `管家云文档`，
+  都不是登录页。两个并发会话各自读到完整 27 个 cookie，互不影响。
+- **分流**：不加任何提示时，`wiki.17u.cn` 自动落到 air（规则 `*.17u.cn`）、
+  `ip-api.com` 自动落到 mac-mini-2（兜底规则），两个会话各自的页面互不干扰。
+
+### 还剩
+
+1. `npm publish` + systemd 让 browser-hub 在 VPS 常驻，`claude mcp add browser-hub`，
+   删掉老的 `playwright`（指向 8930 那个）。**这一步之后需要最后一次 `/mcp` 重连，往后再也不用。**
+2. 铺 mac-mini-1（公司备用），补上公司那条路由的 fallback。
+3. 改 skill `internal-web-via-mac`：删掉单活口和 `/mcp` 重连那两段，改成 `browser_node` 寻址。
+4. daemon 空闲自动回收还没做。目前靠 MCP 会话回收（2 小时）间接释放上游的 browser context。
+
+### 两条别人踩过的坑（2026-08-17 从另一条线拿到的）
+
+- **新写隧道一律用 `vircs-tunnel` 这个 Host 别名**，别自己写 `-J banwagong-us`。air 和 mini-1 的
+  该别名现在经 Clash 的 7899 专用口出去；裸 SSH 那条路在公司网每小时 :10-:29 有 10~30% 失败率。
+- **daemon 必须用 tmux 或 setsid 起，不能用 nohup。** `launchctl kickstart -k` 重启
+  `mcp-ssh-pty-http` 时会杀掉它进程组里所有后台进程，nohup + disown 都挡不住。
