@@ -101,6 +101,7 @@ curl -s http://127.0.0.1:27790/health   # {"ok":true,"name":"ssh-hub","activeSes
 - **重启守护进程会让所有已连着的会话失去 MCP 会话**（回 404 `session_not_found`），得在各会话里 `/mcp` 重连；升级前先想好。stdio 的 `--hub` 仍然可用，谁不想受这个影响谁继续用 stdio。
 - 空闲回收阈值 hub 侧放得很宽（24h）：Claude 会话经常空半小时以上，回收了它下次 `ssh` 就得重新 initialize；hub 会话本身很小，下游 mac daemon 有自己的 30 分钟回收，hub 下次调用会自动重连。
 - 实测（VPS 本机）：经 HTTP hub 一条 `true` 约 25ms；到 mac 的远程命令约 180ms/次、首次 connect 1.1～1.4s（隧道往返为主）。
+- **配置生效**：`hub.json`（node 列表 / note）守护进程启动时读一次、缓存整个进程生命周期，改了要 `systemctl restart ssh-hub`（连着的会话得 /mcp 重连）；vps 节点的 `ssh-servers.json` 每个 MCP 会话各自读，新会话即时生效、老会话重连即可。
 
 ## CLI Commands
 

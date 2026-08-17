@@ -88,6 +88,10 @@ curl -s http://127.0.0.1:27790/health        # activeSessions 应等于连着的
 - 每个 MCP 会话各自一份 HubClientManager（当前 node + 下游连接），互不串台；空闲 24h 才回收（`--idle-min` 可调，0 不回收）。
 - **重启守护进程 = 所有会话的 ssh-hub 都要 `/mcp` 重连**（服务端对旧 session 回 404）。发新版前先想好时机；不想受影响的会话继续用 stdio 注册即可，两种可以并存。
 - 守护进程必须跑 npm 发布版（`/usr/bin/mcp-ssh-pty`），不许指向仓库 dist（见 memory：别覆盖已发布的全局包）。
+- **配置改动的生效方式变了（常驻化的代价）**：
+  - `hub.json`（node 列表、note）是守护进程**启动时读一次、整进程生命周期缓存**。改了必须 `systemctl restart ssh-hub` —— 这会让所有连着的会话回 404、要各自 `/mcp` 重连。
+  - vps 节点的 `ssh-servers.json`（vps 内部的 server 列表）是**每个 MCP 会话各自读一次**。改了新开的会话就能看到，老会话 `/mcp` 重连即可，不必重启整个服务。
+  - 对比 stdio：stdio 每会话一个进程、启动即读最新，没有这个缓存问题。所以「改了 hub.json 要重启守护进程」是常驻模式独有的一步，别忘。
 
 ## 日常使用
 
