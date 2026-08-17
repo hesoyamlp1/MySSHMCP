@@ -1,0 +1,29 @@
+package-lock.json
+  s_06dd3792b86dfd::t_1937be71ffc5aa 3,9
+package.json
+  s_06dd3792b86dfd::t_f208edaf947b73 3
+docs/long-jobs.md
+  s_06dd3792b86dfd::t_ba38c660efd0a7 1-250
+src/hub.ts
+  s_06dd3792b86dfd::t_39537ef4b0b7b7 100
+src/tool-schemas.ts
+  s_06dd3792b86dfd::t_f2a20471e20e59 17
+src/tools.ts
+  s_06dd3792b86dfd::t_b682586a42c14e 131-138,240-255
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "b55d436b61c693584639e3702d9bdb40d07cbccc",
+  "prompts": {},
+  "sessions": {
+    "s_06dd3792b86dfd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "05ae4742-2250-46bf-8830-eeb066844b35",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
