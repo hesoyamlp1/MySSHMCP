@@ -11,9 +11,12 @@ import { dirname, join } from "node:path";
 import { SSHManager } from "./ssh-manager.js";
 import { runCLI } from "./cli.js";
 import { buildDirectServer } from "./server-factory.js";
-import { loadHubConfig } from "./hub-config.js";
+import { loadHubConfig, HubNode } from "./hub-config.js";
 import { HubClientManager } from "./hub-client.js";
 import { buildHubServer } from "./hub.js";
+import { loadBrowserConfig } from "./browser-config.js";
+import { BrowserClientManager } from "./browser-client.js";
+import { buildBrowserHubServer } from "./browser-hub.js";
 
 const PKG_VERSION: string = (() => {
   try {
@@ -101,24 +104,34 @@ async function startStdioServer(): Promise<void> {
   process.on("SIGTERM", cleanup);
 }
 
+/**
+ * HTTP 会话管理这一层只需要「能接上 transport、能关」。
+ * 高层的 McpServer（ssh / ssh-hub 用，zod 注册工具）和底层的 Server
+ * （browser-hub 用，透传上游的 JSON Schema）都满足这个形状。
+ */
+interface ConnectableServer {
+  connect(transport: StreamableHTTPServerTransport): Promise<void>;
+  close(): Promise<void>;
+}
+
 interface Session {
   transport: StreamableHTTPServerTransport;
-  server: McpServer;
+  server: ConnectableServer;
   /** 释放这个会话独占的资源（直连模式：SSHManager；hub 模式：到各 node 的下游连接） */
   close: () => Promise<void>;
   lastActivity: number; // 用于 idle 回收：非优雅断开时 onclose 不触发，靠这个扫掉僵尸 session
 }
 
 /**
- * 一个 HTTP 会话背后要挂的东西：一份独立的 McpServer + 释放它的办法。
- * 直连模式和 hub 模式各给一个工厂，HTTP 会话管理这一层是共用的。
+ * 一个 HTTP 会话背后要挂的东西：一份独立的 server + 释放它的办法。
+ * 直连 / ssh-hub / browser-hub 各给一个工厂，HTTP 会话管理这一层是共用的。
  */
 interface HttpServeSpec {
   /** health 里显示、日志里带的名字 */
   name: string;
   /** 默认空闲回收阈值（毫秒），0 = 不回收；--idle-min 可覆盖 */
   defaultIdleMs: number;
-  makeServer: () => { server: McpServer; close: () => Promise<void> };
+  makeServer: () => { server: ConnectableServer; close: () => Promise<void> };
 }
 
 function isInitializeRequest(body: unknown): boolean {
@@ -358,6 +371,75 @@ async function startHubServer(argv: string[]): Promise<void> {
 }
 
 /**
+ * 启动 browser-hub 模式：把上游 playwright 的原生 browser_* 工具原样透传给 Claude，
+ * 外加一个 browser_node 用来选机器。
+ *
+ * - 浏览器全部跑在远程机器（三台 mac）上；VPS 只跑这个转发进程（约 100M），一个 chromium 都不落。
+ * - 配置寄生在 ssh-hub 那份 hub.json 里：节点的 browser 段 + 顶层 browserRoutes。
+ * - 拉起远端 daemon 是借该机器自己的 ssh daemon 执行的，browser-hub 不实现任何 ssh 能力。
+ * - 每个 MCP 会话各自一份 BrowserClientManager = 各自的上游 session = 各自的 browser context。
+ *   上游用 --isolated 跑，所以多个会话连同一台机器的同一个 daemon 也互不干扰。
+ */
+async function startBrowserHubServer(argv: string[]): Promise<void> {
+  const getArg = (name: string): string | undefined => {
+    const i = argv.indexOf(name);
+    if (i >= 0 && i + 1 < argv.length) return argv[i + 1];
+    return undefined;
+  };
+
+  const cfg = loadBrowserConfig(getArg("--hub-config"));
+  const nodeNames = cfg.nodes.map((n) => n.name).join(", ");
+
+  // 跑 up/down 命令要用各机器的 ssh daemon：把 browser 节点映射回 ssh-hub 的节点形状
+  const sshNodes: HubNode[] = cfg.nodes.map((n) => ({
+    name: n.name,
+    url: n.sshUrl,
+    token: n.sshToken,
+    local: n.sshLocal,
+  }));
+
+  const makeServer = () => {
+    const hub = new HubClientManager(sshNodes, PKG_VERSION);
+    const bmgr = new BrowserClientManager(cfg.nodes, hub, PKG_VERSION);
+    const { server, close } = buildBrowserHubServer(cfg, bmgr, PKG_VERSION);
+    return {
+      server,
+      close: async () => {
+        await close().catch(() => {});
+        await hub.closeAll().catch(() => {});
+      },
+    };
+  };
+
+  const httpOpts = parseHttpOptions(argv);
+  if (httpOpts) {
+    console.error(
+      `[mcp-ssh-pty:browser-hub] browser hub (http): ${cfg.nodes.length} node(s): ${nodeNames}`
+    );
+    await serveHttp(httpOpts, {
+      name: "browser-hub",
+      // 比 ssh-hub 的 24h 短：会话回收会顺带断开上游、释放那边的 browser context（chromium 占内存）。
+      // 但也别太短——正在看的页面被回收掉就得从导航重来一遍。
+      defaultIdleMs: 2 * 60 * 60 * 1000,
+      makeServer,
+    });
+    return;
+  }
+
+  const { server, close } = makeServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(`[mcp-ssh-pty] browser hub: ${cfg.nodes.length} node(s): ${nodeNames}`);
+
+  const cleanup = async () => {
+    await close();
+    process.exit(0);
+  };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+}
+
+/**
  * 主函数
  */
 async function main(): Promise<void> {
@@ -367,6 +449,11 @@ async function main(): Promise<void> {
   }
 
   const argv = process.argv.slice(2);
+
+  if (argv.includes("--browser-hub")) {
+    await startBrowserHubServer(argv);
+    return;
+  }
 
   if (argv.includes("--hub")) {
     await startHubServer(argv);
