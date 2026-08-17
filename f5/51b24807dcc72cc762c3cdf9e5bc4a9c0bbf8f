@@ -1,0 +1,23 @@
+README.md
+  s_10d1e685fdf142::t_867e9eb7fe143a 201-205,208-209,213-215
+package.json
+  s_10d1e685fdf142::t_5b27f871fdbaa7 3
+src/tools.ts
+  s_10d1e685fdf142::t_519706921ae03b 72,75-84,86-97,1009-1017
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "f551b24807dcc72cc762c3cdf9e5bc4a9c0bbf8f",
+  "prompts": {},
+  "sessions": {
+    "s_10d1e685fdf142": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "25294942-f6b5-4714-a211-c73774fadbda",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
