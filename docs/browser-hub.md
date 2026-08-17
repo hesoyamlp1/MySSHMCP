@@ -1,8 +1,9 @@
 # browser-hub 设计：远程浏览器统一寻址
 
-状态：**已实现，两台机器落地跑通**（macbook-air + mac-mini-2），2026-08-17。
-代码在 `src/browser-*.ts`；实际部署情况、跟本设计的偏差、实测数据都在第十三节。
-下面第一到十二节保持写设计时的原样（它记着当时的判断依据），有出入的地方以第十三节为准。
+状态：**已实现，三台机器落地跑通**（macbook-air + mac-mini-2 + windows-4070ti），2026-08-17。
+代码在 `src/browser-*.ts`；部署情况和实测数据在第十三节，windows 那台的四处特殊之处在第十四节。
+下面第一到十二节保持写设计时的原样（它记着当时的判断依据），有出入的地方以第十三、十四节为准。
+mac-mini-1 还没接（它那台机器侧断线，从 VPS 够不到）。
 一句话：把「浏览器跑在哪台机器」这件事从每次手工操作变成一次寻址，做法跟 ssh-hub 同构，代码大部分是复用。
 
 ---
@@ -342,3 +343,87 @@ mac-mini-2  →  80.251.218.180 IT7 洛杉矶         ← 搬瓦工，机房 IP
   该别名现在经 Clash 的 7899 专用口出去；裸 SSH 那条路在公司网每小时 :10-:29 有 10~30% 失败率。
 - **daemon 必须用 tmux 或 setsid 起，不能用 nohup。** `launchctl kickstart -k` 重启
   `mcp-ssh-pty-http` 时会杀掉它进程组里所有后台进程，nohup + disown 都挡不住。
+
+---
+
+## 十四、windows-4070ti 落地（2026-08-17）
+
+家里那台 windows（i5-14600KF 20 线程 / 32G / RTX 4070 Ti，`192.168.31.50`）已接入，端口 27784。
+它跟三台 mac 有四处实质不同，都是踩出来的。
+
+### 1. daemon 不能用 Start-Process 起
+
+**Windows OpenSSH 用 Job Object 管子进程，ssh session 结束会终止整个 job**，
+`Start-Process -WindowStyle Hidden` 起的进程照样被杀（实测：PID 记下了，下一条 exec 进来进程已经没了）。
+改用 WMI 的 `Win32_Process.Create` —— 进程由 WMI 服务创建，父进程是 WmiPrvSE，完全脱离 ssh 的 job。
+这跟 mac 上"必须 tmux 不能 nohup"是同一类问题，只是机制不同（Job Object vs 进程组）。
+
+因为 `Win32_Process.Create` 不支持输出重定向，`pw-up.ps1` 会动态生成一个 `.cmd`（带 `> log 2>&1`）
+再起它。所以记下的 PID 是那个 cmd 的，`pw-down.ps1` 按"谁在监听 8930"找 node 本体。
+
+### 2. 它没有自己的 ssh daemon
+
+三台 mac 各跑一个 `mcp-ssh-pty --http`，而这台是挂在 vps 节点下面的一个 server
+（`ssh({node:"vps", server:"windows-4070ti"})`）。原设计假设"每个 browser 节点自己有 ssh daemon、
+用 `server:"local"` 跑 up/down"，对它不成立。
+
+2.9.1 加了 `browserNodes`（顶层）+ `via`/`server` 来正确表达这件事。**但 2.9.1 还没发布**，
+所以当前是变通：把它放在 `nodes` 里、给一个占位 url（`http://127.0.0.1:1/mcp`，让 ssh-hub 的
+配置校验过关）、**不配 up/down**，daemon 改由任务计划 `MoriPwDaemon` 常驻
+（登录时 + 每 10 分钟，脚本幂等）。2.9.1 上线后可以挪回 `browserNodes` 并改回按需拉起。
+
+⚠️ 副作用：`ssh({action:"list"})` 里会多一个永远显示离线的 `windows-4070ti`，note 里写明了原因。
+
+### 3. 出口 IP 不稳定 —— 这台最需要注意的一点
+
+```
+直连      183.211.82.110  中国移动      ← 家宽真实 IP
+经 7897   80.251.218.180  IT7 洛杉矶    ← 搬瓦工机房 IP
+```
+
+三台 mac 的 Clash 开了 TUN（默认路由是 utun4），浏览器不设代理也被接管；**这台的默认路由是
+`192.168.31.1`，TUN 没接管**，而 playwright 的 chromium 默认不用系统代理 —— 不配代理就用家宽
+真实 IP 出去。而且用户会为了打游戏手动关 Clash，出口随时在变。
+
+处置：
+- daemon 加 `--proxy-server http://127.0.0.1:7897` 固定出口，
+  加 `--proxy-bypass "192.168.31.*,localhost,127.0.0.1,*.local"` 让家里内网直连。
+  取舍是**宁可 Clash 关了之后访问公网明确失败，也不要静默用家里真实 IP 出去**。
+- **路由按"不受 Clash 影响的能力"分**：家里内网 → 它（bypass 直连，关 Clash 也通）；
+  公网兜底 → mac-mini-2（mac 的 Clash 常驻）。
+- hub 的 fallback 救不了 Clash 被关的情况：那时它的 daemon 端口还在听、探活是"在线"，
+  只是访问公网失败。所以靠路由分配避开，不靠自动切换。
+
+### 4. 版本比 mac 新，所以排在节点列表最后
+
+它是 `@playwright/mcp` 0.0.79（Playwright 1.63.0-alpha），两台 mac 是 0.0.75（1.61.0-alpha）。
+差异：windows 多一个 `browser_find`，`browser_take_screenshot` 的 schema 不同，其余 22 个一致。
+
+**没有强行统一版本**：升级 mac 的 playwright-mcp 有可能改变 profile 目录的 hash
+（那是启动参数的指纹），而 `tc-wiki` / `tc-configcenter` / `tc-langfuse` / `jean` 那几个 skill
+正靠那些 profile 里的登录态吃饭 —— 为一个工具冒丢登录态的风险不值得。
+改成让它排在节点列表**最后**：工具清单取第一个在线节点的，只要有 mac 在线就取自 mac 那份
+（23 个，是 windows 那 24 个的子集，任何机器都执行得了）。
+
+### 装了什么
+
+| 位置 | 内容 |
+|---|---|
+| `C:\Users\lucas\.mori\pw-up.ps1` / `pw-down.ps1` | 起停 daemon（WMI 起、按端口停） |
+| `C:\Users\lucas\.mori\install-pw-daemon-task.ps1` | 注册 `MoriPwDaemon`（daemon 常驻） |
+| `C:\ProgramData\ssh\tunnel\config-pw` | 独立 ssh config，`RemoteForward 27784 -> 8930` |
+| `C:\ProgramData\ssh\tunnel\pw-tunnel.ps1` | 隧道 supervisor（退避重连），日志 `pw-tunnel.log` |
+| `C:\ProgramData\ssh\tunnel\install-pw-task.ps1` | 注册 `MoriPwTunnel`（SYSTEM、开机自起） |
+
+**原有的 `config` / `tunnel.ps1` / `MoriTunnelVircs`（2201 那条）一个字节都没碰** ——
+那是进这台机器的唯一通路，而 `Host vircs-tunnel` 块里带着 `RemoteForward 2201` 和
+`ExitOnForwardFailure yes`，在同一个别名上再加转发，一旦端口冲突会把 2201 一起掀掉。
+
+### 两个顺带发现的、跟 browser-hub 无关的问题
+
+- **npm/git 的代理配置指向一个已经不存在的端口**：两者都配着 `127.0.0.1:10809`，实际在听的是
+  7897。所以在这台机器上 `npm i` / `git clone` 会失败（memory 里记的"代理没开时 GitHub 不通"
+  其实是端口变了）。装 playwright 时我临时用 `--proxy http://127.0.0.1:7897` 绕过，
+  **没有改它的全局配置**。
+- 写 PowerShell 脚本时，**变量后面紧跟中文标点会被当成变量名的一部分**
+  （`"$Log："` 解析成变量 `Log：` 而报错），插值要写 `${Log}`。跟 bash 里 `$OUT（` 同一个坑。
