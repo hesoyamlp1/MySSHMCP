@@ -198,6 +198,11 @@ PLIST=~/Library/LaunchAgents/com.mori.mcp-ssh-pty-http.plist
 launchctl bootout gui/$(id -u) "$PLIST"; launchctl bootstrap gui/$(id -u) "$PLIST"
 ```
 
+> **⚠️ kickstart -k 会杀掉 daemon 进程组里的所有后台进程。** 经 ssh-hub 的 exec 通道用 `nohup`+disown 起的后台任务，
+> 虽然被 launchd 收养（ppid=1），**进程组仍是 daemon 那个**，`kickstart -k`（向整个进程组发信号）照样把它带走——
+> 判"会不会被 kickstart 杀"看 PGID/SESS，不是 PPID。要活下来得 `setsid` 自成会话，或干脆用 tmux（长任务本就推荐 tmux）。
+> 所以**升级 / kickstart 任何 mac 的 daemon 前，先确认那台没有别的会话留的后台长任务**（2026-08-17 一次 rollout 就误杀过一个别的会话的探测进程）。
+
 ---
 
 ## Troubleshooting
