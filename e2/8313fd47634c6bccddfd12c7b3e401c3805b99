@@ -1,0 +1,33 @@
+README.md
+  s_41937374d81ed6::t_0ee20a14533d9d 211,214-224
+src/exec-runner.ts
+  s_10d1e685fdf142::t_43dd34b32b4ec0 2,26-57,77-80,82,185-186
+src/tool-schemas.ts
+  s_10d1e685fdf142::t_a5bb8eae269eb2 33
+src/tools.ts
+  s_10d1e685fdf142::t_3e69f06a89d79f 58-59,62,66-101,333,472,521-527,531,544
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "e28313fd47634c6bccddfd12c7b3e401c3805b99",
+  "prompts": {},
+  "sessions": {
+    "s_10d1e685fdf142": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "25294942-f6b5-4714-a211-c73774fadbda",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    },
+    "s_41937374d81ed6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ac515f2e-d585-4f99-bcc1-c64c8c6d3340",
+        "model": "claude-fable-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
