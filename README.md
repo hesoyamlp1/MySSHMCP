@@ -198,13 +198,20 @@ ssh({ action: "connect", server: "my-server" })  # Remote SSH
 
 ### Command Execution
 
-默认走 **exec 通道**：一发一收、独立、直接返回 stdout/stderr/exitCode，输出无需清洗，且不会被 heredoc / 续行符卡死 session。
+默认走 **exec 通道**：一发一收、独立、不会被 heredoc / 续行符卡死 session。
+
+**返回形状贴近原生 Bash（v2.8.0 起）**：成功就直接回原始 stdout（真换行、无 JSON 外壳）；
+有 stderr 接在后面；只有异常时末尾加一行标注——`[exit 3]` / `[超时]` / `[signal …]` / `[输出已截断]`（并置 isError）。
+无输出的成功回 `(exit 0，无输出)`。这样模型读着跟原生 Bash 一致、也省 token。
 
 ```
-ssh({ command: "ls -la" })                            # 默认 exec，返回 stdout + exitCode
-ssh({ command: "make test", timeout: 120 })
+ssh({ command: "ls -la" })                            # 直接回目录列表（真换行）
+ssh({ command: "make test", timeout: 120 })           # 失败时末尾 [exit N] + isError
 ssh({ command: "python3 -", stdin: "print(1+1)" })    # 多行内容喂 stdin（exec 通道）
 ```
+
+`sftp({action:"read"})` 同样贴近原生 `Read`：带 `cat -n` 行号返回文件内容，不再包 JSON。
+（`connect` / `list` / `status` 这类控制响应仍是结构化 JSON——它们是状态数据，不是命令/文件内容。）
 
 ### Interactive / 持久 shell（`mode:"pty"`）
 

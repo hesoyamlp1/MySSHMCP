@@ -69,33 +69,32 @@ async function runExec(
  * 把 ExecResult 包装成模型友好的 JSON。stdout/stderr 各自检查是否过大。
  */
 function shapeExecResult(
-  base: Record<string, unknown>,
+  _base: Record<string, unknown>,
   result: ExecResult
 ): string {
-  const payload: Record<string, unknown> = {
-    ...base,
-    exitCode: result.exitCode,
-    timedOut: result.timedOut || undefined,
-    truncated: result.truncated || undefined,
-    signal: result.signal,
-    bytesStdout: result.bytesStdout,
-    bytesStderr: result.bytesStderr,
-    stdout: result.stdout,
-    stderr: result.stderr || undefined,
-    mode: "exec",
-  };
-  // 复用 truncateIfLarge：把 stdout 当作 output 字段过一遍
-  // 单独处理：stdout 大时存盘
-  const stdoutSave = saveIfLarge(result.stdout);
-  if (stdoutSave.saved) {
-    payload.stdout = stdoutSave.tail;
-    payload._overflow = {
-      totalChars: stdoutSave.totalChars,
-      savedTo: stdoutSave.filePath,
-      hint: `⚠️ stdout 过长（${stdoutSave.totalChars} 字符），完整内容保存至 ${stdoutSave.filePath}，仅显示尾部 2000 字符。`,
-    };
+  // 贴近原生 Bash：正常成功就只回原始 stdout（真换行、无 JSON 外壳）。
+  // stderr 有内容时接在后面；只有异常（非零退出 / 超时 / 信号 / 截断）才在末尾加一行 [ ] 标注。
+  const parts: string[] = [];
+
+  // stdout 过长：存盘，正文只留尾部 2000 字符，加一行指路（原生 Bash 也会截断大输出）
+  let stdout = result.stdout;
+  const save = saveIfLarge(stdout);
+  if (save.saved) {
+    parts.push(`[输出过长：完整 ${save.totalChars} 字符已存至 ${save.filePath}，下面只是末尾 2000 字符]`);
+    stdout = save.tail ?? "";
   }
-  return JSON.stringify(payload, null, 2);
+  if (stdout) parts.push(stdout);
+  if (result.stderr) parts.push(`--- stderr ---\n${result.stderr}`);
+
+  const flags: string[] = [];
+  if (result.timedOut) flags.push("超时");
+  if (typeof result.exitCode === "number" && result.exitCode !== 0) flags.push(`exit ${result.exitCode}`);
+  if (result.signal) flags.push(`signal ${result.signal}`);
+  if (result.truncated && !save.saved) flags.push("输出已截断");
+  if (flags.length) parts.push(`[${flags.join(" · ")}]`);
+
+  const text = parts.join("\n");
+  return text.length ? text : "(exit 0，无输出)";
 }
 
 /**
@@ -1007,19 +1006,15 @@ sftp({ action: "download", remotePath: "/var/log/app.log", localPath: "/tmp/app.
         const readResult = isLocal
           ? await sftpManager.readLocalFile(path, { maxBytes })
           : await sftpManager.readRemote(sshManager.getClient()!, path, { maxBytes });
-        return {
-          content: [{
-            type: "text",
-            text: truncateIfLarge({
-              action: "read",
-              target: isLocal ? "local" : status.serverName,
-              path: readResult.path,
-              bytes: readResult.bytes,
-              truncated: readResult.truncated,
-              output: readResult.content,
-            }),
-          }],
-        };
+        // 贴近原生 Read：带行号（cat -n 风格），内容直接是文本、无 JSON 外壳
+        const lines = readResult.content.split("\n");
+        if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop(); // 去掉文件末尾换行造成的空行
+        const numbered = lines.map((ln, i) => `${String(i + 1).padStart(6)}\t${ln}`).join("\n");
+        let readText = readResult.content === "" ? "(空文件)" : numbered;
+        if (readResult.truncated) {
+          readText += `\n[文件共 ${readResult.bytes} 字节，超过读取上限，上面只是前面部分]`;
+        }
+        return { content: [{ type: "text", text: readText }] };
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         return {
