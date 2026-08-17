@@ -1,0 +1,31 @@
+docs/browser-hub.md
+  s_6c51bb9c0b9069::t_8dd681c223079b 1-268
+src/browser-tools-snapshot.ts
+  s_6c51bb9c0b9069::t_ff0fb10f150403 1-798
+scripts/gen-tools-snapshot.mjs
+  s_6c51bb9c0b9069::t_71a6bccc9a64fd 1-85
+src/browser-client.ts
+  s_6c51bb9c0b9069::t_c7b8c0db8910ab 1-296
+src/browser-config.ts
+  s_6c51bb9c0b9069::t_8917b0d6b47d65 1-176
+src/browser-hub.ts
+  s_6c51bb9c0b9069::t_9efd1d381c648e 1-377
+src/index.ts
+  s_6c51bb9c0b9069::t_0729f427ab4f35 14,17-19,107-116,119,126-127,134,373-441,453-457
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "0b2ebe68a9839f3f786d573430fdd0b66c39c83f",
+  "prompts": {},
+  "sessions": {
+    "s_6c51bb9c0b9069": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "31cbb96b-58f2-401a-9c01-3870fa37df72",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
