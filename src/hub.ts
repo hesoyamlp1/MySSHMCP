@@ -97,7 +97,7 @@ export function buildHubServer(mgr: HubClientManager, version: string): McpServe
 - ssh({command:"..."})                           在当前 node 的当前连接上执行
 - ssh({node:"mac1", action:"connect", server:"0.2"})    连 mac1 背后的内网机（mac1 一跳）
 
-其余 action / command / shortcut / read / signal / timeout / stdin / mode 等语义与单机 ssh 工具完全一致，原样转发到目标 node 的 daemon。多台 mac 的连接互相独立、可同时活着；切 node 不影响其它 node 上正在跑的东西（长任务照例丢 tmux）。
+其余 action / command / shortcut / read / signal / timeout / stdin / mode 等语义与单机 ssh 工具完全一致，原样转发到目标 node 的 daemon。多台 mac 的连接互相独立、可同时活着；切 node 不影响其它 node 上正在跑的东西（长任务一律用 tmux 起，写法见 command 参数描述里的「长任务」一节）。
 
 命令默认走 exec 通道（无头、一发一收、直接拿 exitCode、输出无需清洗、绝不会卡死 session）。只有交互式 REPL / TUI / tail -f + Ctrl-C / 需保留 cwd 的多步操作才用 mode:"pty"。
 

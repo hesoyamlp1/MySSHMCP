@@ -128,6 +128,14 @@ function shapeExecResult(
   if (result.signal) flags.push(`signal ${result.signal}`);
   if (result.truncated && !save.saved) flags.push("输出已截断");
   if (flags.length) parts.push(`[${flags.join(" · ")}]`);
+  // 超时时把正确做法放在这里：模型正好在这一刻需要它，比写在工具描述里管用得多
+  if (result.timedOut) {
+    parts.push(
+      "[超时只是我们不再等，进程多半仍在远端跑（sshd 不支持 signal，杀不掉）。" +
+      "长任务改用 tmux 起：mkdir -p ~/.mori/jobs && tmux new -d -s <名> '<命令> > ~/.mori/jobs/<名>.log 2>&1; echo rc=$? > ~/.mori/jobs/<名>.status'；" +
+      "之后 cat 那个 .status 就知道完没完]"
+    );
+  }
 
   const text = parts.join("\n");
   return text.length ? text : "(exit 0，无输出)";
@@ -228,6 +236,22 @@ mode:"pty"（或 interactive:true）才进；PTY 在首次 pty 调用时懒加�
 - 交互式 REPL（mysql/python/redis-cli）、TUI（vim/top/less）
 - tail -f 跟日志 + 之后 signal:"SIGINT" 中断
 - 连续依赖 cd / source / venv 的多步操作
+
+### 长任务：超过 5 分钟就别占着这次调用等（构建 / 测试 / 同步 / 大批量传输）
+timeout 上限 300 秒，而且**超时只是我们不再等** —— 远端进程还在跑（OpenSSH 的 sshd 不实现
+signal 请求，我们杀不掉它）。所以长任务不要靠调大 timeout，用 tmux 起，一次调用起完就返回：
+
+  ssh({command:"mkdir -p ~/.mori/jobs && tmux new -d -s job-build 'cd /repo && npm run build > ~/.mori/jobs/build.log 2>&1; echo rc=$? > ~/.mori/jobs/build.status'"})
+
+之后按需要查（每次都是一条独立的快命令，不占用等待）：
+- 完没完：cat ~/.mori/jobs/build.status —— 文件不存在就是还在跑，有 rc=0 就是成功跑完
+- 看输出：tail -50 ~/.mori/jobs/build.log
+- 还在不在：tmux ls | grep job-build
+- 停掉它：tmux kill-session -t job-build
+
+必须用 tmux，**别用 nohup / disown / 结尾 &**：daemon 被重启时会杀掉自己进程组里的所有后台
+进程，nohup + disown 都挡不住（2026-08-17 实测），ppid=1 也不管用。tmux 起的才活得下来。
+目标机没有 tmux 时（比如 windows）改用那台机器自己的办法（任务计划 / Start-Process）。
 
 🚫 仅 pty 模式的铁律：mode:"pty" 时 command 绝不内联 heredoc（<<EOF）/ 绝不留未闭合的引号、反斜杠、行尾管道
 ——会把 PTY 卡死在 heredoc>/quote> 续行符、sentinel 永远等不到、整条 session 报废。

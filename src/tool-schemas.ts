@@ -14,7 +14,7 @@ export const SSH_INPUT_SHAPE = {
   server: z.string().optional().describe("服务器名称（connect 时必填）"),
   content: z.string().optional().describe("备注内容（notes 写入时使用）"),
   command: z.string().optional().describe("要执行的命令。默认走 exec 通道：一发一收、独立、直接返回 stdout/stderr/exitCode，输出无需清洗、绝不会卡死 session。只有 mode:\"pty\"（或 interactive:true）才进持久 PTY shell——见 mode 参数。"),
-  timeout: z.number().optional().describe("命令最大等待时间（秒），默认 5，最大 300。对于 pip install、apt upgrade 等长时间命令建议设置较大值"),
+  timeout: z.number().optional().describe("命令最大等待时间（秒），默认 5，最大 300。npm install、apt upgrade 这类几分钟的命令调大它。⚠️ 超过 5 分钟的任务不要靠调大 timeout——超时只是我们不再等，远端进程还在跑（sshd 不支持 signal，杀不掉），改用 command 描述里的 tmux detach 写法"),
   read: z.boolean().optional().describe("读取缓冲区"),
   lines: z.number().optional().describe("读取行数，默认 20，-1 返回全部"),
   offset: z.number().optional().describe("读取起始偏移，默认 0"),
