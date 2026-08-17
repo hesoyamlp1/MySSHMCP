@@ -1,0 +1,19 @@
+skills/deploy-ssh-mcp/SKILL.md
+  s_10d1e685fdf142::t_00f6a3e263bb35 201-205
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "d7cae81ed4efb0c59ebaa4a189f0a6a124d7be62",
+  "prompts": {},
+  "sessions": {
+    "s_10d1e685fdf142": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "25294942-f6b5-4714-a211-c73774fadbda",
+        "model": "claude-fable-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
