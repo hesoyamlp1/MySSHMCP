@@ -643,20 +643,17 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             if (serverName === "local") {
               await sshManager.connect(LOCAL_SERVER);
               const notes = notesManager.read("local");
-              const globalHints = configManager.getGlobalHints();
-              const localHints = configManager.getServerHints("local");
-              const mergedHints = [
-                ...(globalHints ?? []),
-                ...(localHints ?? []),
-              ];
+              const hintCount = (configManager.getGlobalHints()?.length ?? 0) + (configManager.getServerHints("local")?.length ?? 0);
+              const extras: string[] = [];
+              if (notes) extras.push("备注");
+              if (hintCount) extras.push(`${hintCount} 条使用提示`);
+              const tail = extras.length ? `。有 ${extras.join(" + ")}——要看用 ssh({action:"notes"})` : "";
               return {
                 content: [{
                   type: "text",
                   text: JSON.stringify({
-                    message: "成功连接到本地（默认 exec 模式；交互式/持久 shell 用 mode:\"pty\"）",
-                    notes: notes || undefined,
+                    message: `已连接 local（默认 exec；交互式/持久 shell 用 mode:"pty"）${tail}`,
                     shortcuts: summarizeShortcuts(configManager.getEffectiveShortcuts("local"), "brief"),
-                    hints: mergedHints.length > 0 ? mergedHints : undefined,
                   }, null, 2),
                 }],
               };
@@ -691,20 +688,17 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             }
 
             const notes = notesManager.read(serverName);
-            const globalHints = configManager.getGlobalHints();
-            const serverHints = configManager.getServerHints(serverName);
-            const mergedHints = [
-              ...(globalHints ?? []),
-              ...(serverHints ?? []),
-            ];
+            const hintCount = (configManager.getGlobalHints()?.length ?? 0) + (configManager.getServerHints(serverName)?.length ?? 0);
+            const extras: string[] = [];
+            if (notes) extras.push("备注");
+            if (hintCount) extras.push(`${hintCount} 条使用提示`);
+            const tail = extras.length ? `。有 ${extras.join(" + ")}——要看用 ssh({action:"notes"})` : "";
             return {
               content: [{
                 type: "text",
                 text: JSON.stringify({
-                  message: `成功连接到 '${serverName}'（默认 exec 模式；交互式/持久 shell 用 mode:"pty"）`,
-                  notes: notes || undefined,
+                  message: `已连接 '${serverName}'（默认 exec；交互式/持久 shell 用 mode:"pty"）${tail}`,
                   shortcuts: summarizeShortcuts(configManager.getEffectiveShortcuts(serverName), "brief"),
-                  hints: mergedHints.length > 0 ? mergedHints : undefined,
                 }, null, 2),
               }],
             };
@@ -800,12 +794,17 @@ ssh({ action: "sudo", server: "my-server" })    # 获取指定服务器的 sudo 
             }
 
             const notes = notesManager.read(targetServer);
+            const nHints = [
+              ...(configManager.getGlobalHints() ?? []),
+              ...(configManager.getServerHints(targetServer) ?? []),
+            ];
             return {
               content: [{
                 type: "text",
                 text: JSON.stringify({
                   server: targetServer,
                   notes: notes || "（暂无备注）",
+                  hints: nHints.length ? nHints : undefined,
                 }, null, 2),
               }],
             };

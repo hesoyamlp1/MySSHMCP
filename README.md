@@ -222,6 +222,10 @@ ssh({ node: "mac-mini-2", server: "local", command: "sw_vers" }) # hub 场景：
 > exec 通道用的 PATH：daemon 启动时抓一次登录 shell 的 `$PATH`（就是终端里看到的那个）并与自身 PATH 取并集，
 > 所以 mac 上不必再手动 `export PATH` 就能跑 `sysctl` / `brew` 等；只付一次、不进每条命令。
 
+**connect 的 notes 按需加载（v2.8.0 起）**：`connect` 不再把整段 notes 砸进上下文，只回一行"已连接 + 有几条说明"；
+真要看那台机器的 notes / 使用提示时用 `ssh({action:"notes"})` 拉全文（像 skill 一样按需加载，省每次重连的上下文）。
+shortcuts 仍随 connect 给出（简版），完整用 `ssh({action:"shortcuts"})`。
+
 `sftp({action:"read"})` 同样贴近原生 `Read`：带 `cat -n` 行号返回文件内容，不再包 JSON。
 （`connect` / `list` / `status` 这类控制响应仍是结构化 JSON——它们是状态数据，不是命令/文件内容。）
 
