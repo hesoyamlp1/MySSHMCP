@@ -1,0 +1,29 @@
+README.md
+  s_10d1e685fdf142::t_6b4a0672fcb308 85-104
+package.json
+  s_10d1e685fdf142::t_8dd93f7b4b473b 3
+skills/deploy-ssh-mcp/SKILL.md
+  s_10d1e685fdf142::t_4d334d600534f4 74-91
+src/exec-runner.ts
+  s_10d1e685fdf142::t_07eed96edf3de1 125-132,141-142,147-148,216
+src/index.ts
+  s_10d1e685fdf142::t_fd0ce9afeb01f9 35-36,60-67,107-108,112-123,132,135-136,138,140-141,176-177,179-180,219,223,225,232-233,237,239-241,243-246,268-269,274-275,277-288,291,295,304-315,317-320,330-345,350
+src/sftp-manager.ts
+  s_10d1e685fdf142::t_eb90648cc3a19d 162-165,167,170-193,197-199,260-276,279-281
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "5f6f4a711d5452f9a2a4bbba35c09fe4395b5512",
+  "prompts": {},
+  "sessions": {
+    "s_10d1e685fdf142": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "25294942-f6b5-4714-a211-c73774fadbda",
+        "model": "claude-fable-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
