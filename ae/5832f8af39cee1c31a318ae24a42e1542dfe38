@@ -1,0 +1,19 @@
+package.json
+  s_6c51bb9c0b9069::t_fe0341bf1e4744 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "ae5832f8af39cee1c31a318ae24a42e1542dfe38",
+  "prompts": {},
+  "sessions": {
+    "s_6c51bb9c0b9069": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "31cbb96b-58f2-401a-9c01-3870fa37df72",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
