@@ -1,5 +1,6 @@
 import { Client } from "ssh2";
 import { spawn, execFileSync } from "child_process";
+import { existsSync } from "fs";
 
 /**
  * 单次 exec 调用的结果。stdout/stderr 都是已 utf-8 解码、已截断（如超限）的字符串。
@@ -172,21 +173,50 @@ export function execRemote(
  * 实测这台 VPS 的 ~/.bashrc 会跑 ssh-add -l 去探 mac 上转发过来的 agent，一次 500ms；
  * 起 daemon 的客户端不带 SHLVL（SDK 默认 env、cron）时每条本地命令都要多等这 500ms。
  */
+/**
+ * windows 上用哪个 shell 跑本地命令。
+ *
+ * 优先 pwsh 7，理由有三个：默认 UTF-8 输出（cmd 是 GBK，中文直接乱码）、支持 && 和 ||
+ * （跟 bash / cmd 的写法对得上，5.1 不支持）、结构化能力强（ConvertTo-Json 之类）。
+ * 代价是冷启动比 cmd 慢几百毫秒，用 -NoProfile 省掉 profile 加载能压回去一些。
+ *
+ * 没装 pwsh 7 就退 Windows PowerShell 5.1，再没有才退 cmd —— 保证任何一台 windows 都能跑。
+ * 注意不看 process.env.SHELL：windows 上它要么没有，要么是 git-bash 设的 unix 风格路径，
+ * 拿它 spawn 会 ENOENT（2026-08-18 在 windows-4070ti 上踩到的就是这个）。
+ */
+function winShell(command: string): { shell: string; shellArgs: string[] } {
+  const pwshCandidates = [
+    "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    "C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe",
+  ];
+  for (const c of pwshCandidates) {
+    if (existsSync(c)) {
+      return { shell: c, shellArgs: ["-NoProfile", "-NonInteractive", "-Command", command] };
+    }
+  }
+  const ps51 = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+  if (existsSync(ps51)) {
+    return { shell: ps51, shellArgs: ["-NoProfile", "-NonInteractive", "-Command", command] };
+  }
+  return { shell: process.env.ComSpec || "cmd.exe", shellArgs: ["/d", "/s", "/c", command] };
+}
+
 export function execLocal(
   command: string,
   options: ExecOptions = {}
 ): Promise<ExecResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-  // windows 上一律用 ComSpec（cmd.exe）：那边的 SHELL 变量要么没有，要么是 git-bash 设的
-  // unix 风格路径，拿它 spawn 会 ENOENT。跟 Windows OpenSSH 自己的默认 shell 保持一致。
   const isWin = process.platform === "win32";
-  const shell = isWin
-    ? (process.env.ComSpec || "cmd.exe")
-    : (process.env.SHELL || "/bin/sh");
-  const shellArgs = isWin
-    ? ["/d", "/s", "/c", command]
-    : /(^|\/)bash$/.test(shell) ? ["--norc", "-c", command] : ["-c", command];
+  const { shell, shellArgs } = isWin
+    ? winShell(command)
+    : (() => {
+        const sh = process.env.SHELL || "/bin/sh";
+        return {
+          shell: sh,
+          shellArgs: /(^|\/)bash$/.test(sh) ? ["--norc", "-c", command] : ["-c", command],
+        };
+      })();
   const hasStdin = options.stdin !== undefined;
 
   return new Promise<ExecResult>((resolve, reject) => {
