@@ -1,0 +1,19 @@
+src/exec-runner.ts
+  s_06dd3792b86dfd::t_79e7656fddd5f1 3,176-203,211-219
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "3d2ceb73493abd1eb1a759e26cc2776ddbac6775",
+  "prompts": {},
+  "sessions": {
+    "s_06dd3792b86dfd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "05ae4742-2250-46bf-8830-eeb066844b35",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
