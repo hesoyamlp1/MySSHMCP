@@ -37,6 +37,11 @@ let cachedPath: string | null = null;
 function enrichedPath(): string {
   if (cachedPath !== null) return cachedPath;
   const base = process.env.PATH ?? "/usr/bin:/bin";
+  // windows 没有登录 shell 这套（PATH 从注册表继承，已经是全的），直接用 base
+  if (process.platform === "win32") {
+    cachedPath = base;
+    return cachedPath;
+  }
   let login = "";
   try {
     const shell = process.env.SHELL || "/bin/sh";
@@ -173,8 +178,15 @@ export function execLocal(
 ): Promise<ExecResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-  const shell = process.env.SHELL || "/bin/sh";
-  const shellArgs = /(^|\/)bash$/.test(shell) ? ["--norc", "-c", command] : ["-c", command];
+  // windows 上一律用 ComSpec（cmd.exe）：那边的 SHELL 变量要么没有，要么是 git-bash 设的
+  // unix 风格路径，拿它 spawn 会 ENOENT。跟 Windows OpenSSH 自己的默认 shell 保持一致。
+  const isWin = process.platform === "win32";
+  const shell = isWin
+    ? (process.env.ComSpec || "cmd.exe")
+    : (process.env.SHELL || "/bin/sh");
+  const shellArgs = isWin
+    ? ["/d", "/s", "/c", command]
+    : /(^|\/)bash$/.test(shell) ? ["--norc", "-c", command] : ["-c", command];
   const hasStdin = options.stdin !== undefined;
 
   return new Promise<ExecResult>((resolve, reject) => {
