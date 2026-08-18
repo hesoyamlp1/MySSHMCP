@@ -111,8 +111,10 @@ systemctl restart ssh-hub browser-hub                            # VPS
 ⚠️ **VPS 上禁止 `npm install -g .` / `npm link` 覆盖全局包**——全局 bin 必须是 npm 发布版。
 改完源码要生效就走上面的发布链路，没有捷径。
 
-⚠️ **重启 ssh-hub = 所有会话的 ssh-hub 都要 `/mcp` 重连**（服务端对旧 session 回 404）。
-挑时机，别在别人跑着长任务时来。browser-hub 重启影响小（它的会话是按需建的）。
+⚠️ **重启 ssh-hub 会让所有会话的旧 session 失效**（服务端回 404）。但 2026-08-17 实测：
+Claude Code 会自己重新 initialize，**多数情况不用手动 `/mcp`**，下一次工具调用就正常了，报错了再敲。
+所以重启的代价比早期文档写的小，不必特意挑时机；有会话正在跑长任务时说一声即可（长任务在
+mac 上的 tmux 里，不受 MCP 层重启影响）。重启顺带把积压的僵尸 session 全部清空。
 
 ⚠️ **`kickstart -k` 会杀掉 daemon 进程组里的所有后台进程**。经 exec 通道用 `nohup` 起的后台任务，
 即使被 launchd 收养（`ppid=1`），进程组仍是 daemon 那个，照样被带走——判据看 PGID/SESS 不是 PPID。
@@ -135,7 +137,7 @@ signal 请求，杀不掉），所以超过 5 分钟的活不要靠调大 timeou
 
 | 配置 | 谁读 | 改完怎么生效 |
 |---|---|---|
-| `~/.mori/ssh/hub.json`（节点、token、note、browser 段、browserRoutes） | 两个 hub 服务**启动时读一次**，整进程缓存 | `systemctl restart ssh-hub` / `browser-hub`。ssh-hub 重启会让所有会话回 404、各自 `/mcp` 重连 |
+| `~/.mori/ssh/hub.json`（节点、token、note、browser 段、browserRoutes） | 两个 hub 服务**启动时读一次**，整进程缓存 | `systemctl restart ssh-hub` / `browser-hub`。旧 session 失效，但客户端多数会自动重连（见第三节） |
 | `~/.mori/ssh/ssh-servers.json`（某台机器内部的 server 列表 / shortcuts） | **每个 MCP 会话各读一次** | 新开会话即生效，老会话 `/mcp` 重连即可，不用重启服务 |
 | 各机 `~/.mori/ssh/notes/<server>.md` | 按需读（`action:"notes"`） | 立即生效 |
 
@@ -264,6 +266,7 @@ hub.json 给该节点加 `browser` 段（和 ssh 的节点定义共用一份，�
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 某 node `online:false` | 隧道没起 / 机器睡了 / daemon 挂了 | VPS `ss -tlnp \| grep <VPS端口>`；空 → 等 launchd 自愈（~15s），不行就那台 `launchctl kickstart -k gui/$(id -u)/com.mori.hub-tunnel`；有监听 → 查该机 daemon |
+| 某 node `online:true` 但命令全超时 | 两种毛病长得一样：**隧道半死**（VPS 侧端口还在监听、转发已经不通）或 **daemon 进程死了**。`list` 的 online 只探端口在不在，探不到后面的进程 | 直接 `curl 127.0.0.1:<VPS端口>/health` 区分：不通就是那一侧真挂了。隧道半死会自愈（VPS 的 sshd `ClientAliveInterval 30`×`CountMax 4`=120 秒判死、释放端口，mac 侧 launchd 15 秒重拉）；**daemon 死了从 VPS 够不到它**，只能在那台机器上跑 `launchctl kickstart -k gui/$(id -u)/com.mori.mcp-ssh-pty-http` |
 | windows-4070ti 一直 offline | **正常**，它没有 ssh daemon（第 5.2 节） | 要跑命令走 `node:"vps", server:"windows-4070ti"` |
 | 两台只连得上一台 | 反向端口撞了 | 按第二节的表错开，各自 kickstart 隧道 |
 | 重启后隧道不回来 | gui LaunchAgent 要登录才起 | 开自动登录 + Clash 设登录项 |
