@@ -1,0 +1,23 @@
+package-lock.json
+  s_06dd3792b86dfd::t_d383dc523350c4 3,9
+package.json
+  s_06dd3792b86dfd::t_79b27d07df3104 3
+src/exec-runner.ts
+  s_06dd3792b86dfd::t_7a319ee6a6e479 40-44,181-189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "47bc380e6d9da1c1b1a356b82eee7ae024d81732",
+  "prompts": {},
+  "sessions": {
+    "s_06dd3792b86dfd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "05ae4742-2250-46bf-8830-eeb066844b35",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
