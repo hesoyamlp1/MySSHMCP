@@ -174,31 +174,30 @@ export function execRemote(
  * 起 daemon 的客户端不带 SHLVL（SDK 默认 env、cron）时每条本地命令都要多等这 500ms。
  */
 /**
- * windows 上用哪个 shell 跑本地命令。
+ * windows 上用哪个 shell 跑本地命令 —— cmd，不是 PowerShell。
  *
- * 优先 pwsh 7，理由有三个：默认 UTF-8 输出（cmd 是 GBK，中文直接乱码）、支持 && 和 ||
- * （跟 bash / cmd 的写法对得上，5.1 不支持）、结构化能力强（ConvertTo-Json 之类）。
- * 代价是冷启动比 cmd 慢几百毫秒，用 -NoProfile 省掉 profile 加载能压回去一些。
+ * 2026-08-18 在 windows-4070ti 上把两边都实测了一遍，结论是 cmd 赢在退出码语义：
+ *   - `pwsh -Command "cmd /c exit 7"` 返回的是 1，不是 7 —— 外部程序的退出码被压平。
+ *     加 `; exit $LASTEXITCODE` 包装能修好原生程序那一半，但 cmdlet 本身不设
+ *     $LASTEXITCODE，于是 `Get-Item 不存在的路径` 反而 exit 0 —— 失败被报成成功，
+ *     比不包装更危险。
+ *   - `cmd /d /s /c` 直接透传子进程的退出码（实测 exit 7 就是 7，命令不存在是 1）。
+ * 退出码是 exec 通道的核心契约（isError 全靠它），不能拿它换 PowerShell 的其它好处。
+ * 要 PowerShell 的结构化能力，在命令里显式写 `pwsh -NoProfile -Command "..."` 即可。
  *
- * 没装 pwsh 7 就退 Windows PowerShell 5.1，再没有才退 cmd —— 保证任何一台 windows 都能跑。
- * 注意不看 process.env.SHELL：windows 上它要么没有，要么是 git-bash 设的 unix 风格路径，
- * 拿它 spawn 会 ENOENT（2026-08-18 在 windows-4070ti 上踩到的就是这个）。
+ * chcp 65001 前缀解决中文乱码：daemon 是后台进程，它 spawn 出来的 cmd 默认用系统 ANSI
+ * 代码页（中文 windows 是 936/GBK），输出的中文按 utf8 解码就是乱码（实测 `ver` 会变成
+ * "Microsoft Windows [�汾 10.0.26200.9168]"）。`>nul` 吞掉 chcp 自己那行提示；
+ * `&` 是无条件串联，ERRORLEVEL 取最后一条命令的，所以退出码不受影响（已实测）。
+ *
+ * 不看 process.env.SHELL：windows 上它要么没有，要么是 git-bash 设的 unix 风格路径，
+ * 拿它 spawn 会 ENOENT（这就是 2.9.3 之前 windows 上 connect local 直接崩的原因）。
  */
 function winShell(command: string): { shell: string; shellArgs: string[] } {
-  const pwshCandidates = [
-    "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-    "C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe",
-  ];
-  for (const c of pwshCandidates) {
-    if (existsSync(c)) {
-      return { shell: c, shellArgs: ["-NoProfile", "-NonInteractive", "-Command", command] };
-    }
-  }
-  const ps51 = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
-  if (existsSync(ps51)) {
-    return { shell: ps51, shellArgs: ["-NoProfile", "-NonInteractive", "-Command", command] };
-  }
-  return { shell: process.env.ComSpec || "cmd.exe", shellArgs: ["/d", "/s", "/c", command] };
+  return {
+    shell: process.env.ComSpec || "cmd.exe",
+    shellArgs: ["/d", "/s", "/c", `chcp 65001 >nul & ${command}`],
+  };
 }
 
 export function execLocal(

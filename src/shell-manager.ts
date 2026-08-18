@@ -74,7 +74,14 @@ export class ShellManager {
   async openLocal(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        const shellPath = process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "/bin/sh");
+        // windows 上用 ComSpec（cmd），跟 exec 通道保持同一个 shell，省得两条通道两套语法。
+        // 不看 process.env.SHELL：那边它要么没有，要么是 git-bash 设的 unix 风格路径。
+        // TODO: PTY 下的中文还是 GBK（exec 那条靠 chcp 65001 前缀解决，PTY 得进去之后再发一次
+        // chcp，会污染首屏输出，等真有人在 windows 上用 mode:"pty" 了再处理）。
+        const shellPath =
+          process.platform === "win32"
+            ? (process.env.ComSpec || "cmd.exe")
+            : (process.env.SHELL || "/bin/sh");
 
         const ptyProc = pty.spawn(shellPath, [], {
           name: "xterm-256color",
