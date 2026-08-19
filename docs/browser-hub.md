@@ -521,9 +521,15 @@ hub 日志里没有对应的 `session closed`，正是因为 hub 自己的会话
 
 ### 修法：两侧各一半
 
-**mac 侧（立刻生效，止血）**：`~/.mori/pw-up.sh` 起 daemon 时带
-`PLAYWRIGHT_MCP_PING_TIMEOUT_MS=0`，心跳整个不跑（`timeout <= 0` 时 `startHeartbeat` 直接 return）。
-三台 mac 的脚本已改成同一份。要恢复心跳：`PW_PING_TIMEOUT_MS=900000 bash ~/.mori/pw-up.sh`。
+**daemon 侧（立刻生效，止血）**：起 daemon 时带 `PLAYWRIGHT_MCP_PING_TIMEOUT_MS=0`，
+心跳整个不跑（`timeout <= 0` 时 `startHeartbeat` 直接 return）。四台跑 daemon 的机器都改了：
+
+- 三台 mac：`~/.mori/pw-up.sh`，脚本已改成同一份（md5 一致）。
+  恢复心跳：`PW_PING_TIMEOUT_MS=900000 bash ~/.mori/pw-up.sh`。
+- windows-4070ti：`C:\Users\lucas\.mori\pw-up.ps1`，写在它动态生成的那个 .cmd 里
+  （`set PLAYWRIGHT_MCP_PING_TIMEOUT_MS=${PingTimeout}`）。
+  恢复心跳：`$env:PW_PING_TIMEOUT_MS = '900000'` 之后再跑脚本。
+  它的链路比 mac 还长（家里 → 搬瓦工 → VPS），更该关。
 
 代价：客户端非优雅消失时（browser-hub 进程被 kill -9），它留下的 context 不会被回收，
 有头模式下窗口留在屏幕上，要重跑 pw-up.sh 才清。日常路径不受影响——hub 结束会话、
