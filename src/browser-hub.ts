@@ -48,9 +48,10 @@ function textResult(obj: unknown, isError = false): CallToolResult {
 
 /** 在上游返回的结果最前面插一行说明（只在为本会话首次选定机器时用） */
 function prependNote(result: CallToolResult, note: string): CallToolResult {
+  // 各 content 块在客户端是直接拼起来显示的，说明后面留一个空行，别跟上游正文粘在一起
   return {
     ...result,
-    content: [{ type: "text", text: note }, ...(result.content ?? [])],
+    content: [{ type: "text", text: note + "\n\n" }, ...(result.content ?? [])],
   };
 }
 
