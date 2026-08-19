@@ -5,7 +5,7 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { BrowserClientManager, loadCachedTools } from "./browser-client.js";
+import { BrowserClientManager, loadCachedTools, UPSTREAM_IDLE_MS } from "./browser-client.js";
 import { BrowserHubConfig, BrowserNode, routeFor } from "./browser-config.js";
 import { SNAPSHOT_TOOLS } from "./browser-tools-snapshot.js";
 
@@ -63,7 +63,13 @@ const BROWSER_NODE_TOOL: Tool = {
     '- action:"status"：当前用的是哪台\n' +
     '- action:"down"：停掉那台机器上的 daemon 释放内存\n' +
     '- action:"relogin"：打印怎么刷新那台机器的登录态（要人在 mac 上登一次 SSO）\n' +
-    "没 connect 过时直接 browser_navigate 也行：会按 URL 自动选机器（公司域名→公司的 mac，家里网段→家里的 mac）。",
+    "没 connect 过时直接 browser_navigate 也行：会按 URL 自动选机器（公司域名→公司的 mac，家里网段→家里的 mac）。\n" +
+    "mac 上的浏览器是有头的：窗口就开在那台 mac 的屏幕上，用户可能正在看，也随时能上手操作。" +
+    "卡在验证码 / 扫码 / SSO 登录 / 必须人点的地方，别自己反复试——直接告诉用户去哪台机器、要他做什么，" +
+    "然后 browser_wait_for 等他弄完再继续（他这样登进去的登录态只在本会话有效）。" +
+    (UPSTREAM_IDLE_MS > 0
+      ? `本会话 ${Math.round(UPSTREAM_IDLE_MS / 60000)} 分钟没碰浏览器，那边的窗口会被关掉，下次调用自动重连、页面要重新导航。`
+      : ""),
   inputSchema: {
     type: "object",
     properties: {
@@ -148,6 +154,13 @@ export function buildBrowserHubServer(
     return all.length === 1 ? all[0].name : undefined;
   }
 
+  /** 一台机器的浏览器窗口在哪、用户能不能接手——给模型看的一句话 */
+  function windowNote(n: BrowserNode): string {
+    return n.browser.headed
+      ? `有头：窗口开在 ${n.name} 的屏幕上，用户看得见你在点什么、也能直接接手（验证码 / 扫码 / SSO 登录这类要人操作的地方，说一声再 browser_wait_for 等）`
+      : "无头：没人看得见；卡在要人操作的地方就换一台有头的 mac";
+  }
+
   function nodeSummary(n: BrowserNode): Record<string, unknown> {
     const b = n.browser;
     const entry: Record<string, unknown> = { node: n.name };
@@ -155,6 +168,7 @@ export function buildBrowserHubServer(
     else entry.logins = "（没配登录态清单；要登录的站可能进不去）";
     if (b.reach) entry.reach = b.reach;
     if (b.concurrency) entry.concurrency = `${activeCount(n.name)}/${b.concurrency} 个会话在用`;
+    entry.窗口 = b.headed ? "有头（用户看得见、能接手）" : "无头（没人看得见）";
     if (b.note) entry.note = b.note;
     return entry;
   }
@@ -216,16 +230,17 @@ export function buildBrowserHubServer(
       if (hit) {
         const online = await mgr.probe(hit.node);
         if (!online && hit.fallback) {
+          const fb = mgr.getNode(hit.fallback)!;
           return {
             node: hit.fallback,
             note:
               `已自动路由到 ${hit.fallback}（规则 ${hit.matched} 本来指向 ${hit.node}，` +
-              `但它现在不在线，用了 fallback）`,
+              `但它现在不在线，用了 fallback）。浏览器窗口：${windowNote(fb)}`,
           };
         }
         return {
           node: hit.node,
-          note: `已自动路由到 ${hit.node}（规则 ${hit.matched}）`,
+          note: `已自动路由到 ${hit.node}（规则 ${hit.matched}）。浏览器窗口：${windowNote(mgr.getNode(hit.node)!)}`,
         };
       }
     }
@@ -261,7 +276,8 @@ export function buildBrowserHubServer(
         })),
         说明:
           "浏览器全部跑在远程机器上，VPS 本机不跑（内存）。没 connect 过时 " +
-          "browser_navigate 会按上面的规则自动选机器。",
+          "browser_navigate 会按上面的规则自动选机器。标着「有头」的机器，浏览器窗口开在它的屏幕上，" +
+          "用户看得见、能接手——要人操作的地方说一声再等。",
       });
     }
 
@@ -274,13 +290,30 @@ export function buildBrowserHubServer(
       }
       const n = mgr.getNode(state.currentNode)!;
       const last = mgr.lastUsedAt(state.currentNode);
-      return textResult({
+      const running = await mgr.probe(state.currentNode);
+      const out: Record<string, unknown> = {
         当前: state.currentNode,
         ...nodeSummary(n),
         本会话已连接: mgr.isConnected(state.currentNode),
         最后一次调用: last ? new Date(last).toISOString() : "（本会话还没调用过）",
-        daemon: (await mgr.probe(state.currentNode)) ? "在跑" : "不在跑",
-      });
+        daemon: running ? "在跑" : "不在跑",
+      };
+      if (running) {
+        // hub.json 的 headed 只是声明；看一眼进程参数，声明和实际不一致要明说
+        const actual = await mgr.detectMode(state.currentNode);
+        const declared = n.browser.headed ? "headed" : "headless";
+        if (actual === "unknown") {
+          out.实际模式 = "探不到（那台机器上没法看进程参数）";
+        } else if (actual === declared) {
+          out.实际模式 = actual === "headed" ? "有头（进程参数里没有 --headless）" : "无头（进程参数里有 --headless）";
+        } else {
+          out.实际模式 =
+            `⚠️ hub.json 声明${declared === "headed" ? "有头" : "无头"}，实际${actual === "headed" ? "有头" : "无头"}` +
+            `——那台机器的 daemon 多半是手动起的（PW_HEADLESS=1 或旧脚本）。` +
+            `要按声明来：browser_node({action:"down", node:"${state.currentNode}"}) 再 connect，让 pw-up.sh 重起。`;
+        }
+      }
+      return textResult(out);
     }
 
     if (action === "connect") {
@@ -297,6 +330,7 @@ export function buildBrowserHubServer(
         已选定: name,
         daemon: detail,
         ...nodeSummary(n),
+        浏览器窗口: windowNote(n),
         下一步: "照常用 browser_navigate / browser_snapshot 等原生工具，它们都会在这台机器上执行",
       });
     }
@@ -319,6 +353,11 @@ export function buildBrowserHubServer(
         机器: name,
         为什么要人工:
           "登录态是一份 storageState（cookie）文件，isolated 浏览器从它注入。刷新它要真的登一次 SSO。",
+        先试更省事的:
+          n.browser.headed
+            ? `这台机器的浏览器是有头的：只是这一次要登录的话，直接让用户在屏幕上你那个窗口里登一次，然后 browser_wait_for 等他登完继续。` +
+              `这样登进去的 cookie 只在本会话的内存 profile 里、不落盘；要让以后每个会话都带上，才走下面的步骤。`
+            : "（这台机器是无头的，只能走下面的步骤）",
         步骤: [
           `1. 用户在 ${name} 上开盖（headful 浏览器要有图形会话）`,
           `2. 在那台机器上跑：bash ~/.mori/browser/relogin.sh`,
@@ -352,16 +391,24 @@ export function buildBrowserHubServer(
         await useNode(node);
       }
 
+      const idleDropped = mgr.takeIdleDroppedNote(node);
       const result = await mgr.callTool(node, toolName, args, {
         timeoutMs: timeoutForCall(args),
       });
 
       // 说明只在首次为本会话选定这台机器时加一次，之后不再往每次结果里塞噪音
+      let out = result;
       if (note && !state.announced.has(node)) {
         state.announced.add(node);
-        return prependNote(result, note);
+        out = prependNote(out, note);
       }
-      return result;
+      if (idleDropped) {
+        out = prependNote(
+          out,
+          `（本会话 ${Math.round(UPSTREAM_IDLE_MS / 60000)} 分钟没碰 ${node} 的浏览器，那边的窗口已经关掉、刚重新连上：之前的页面不在了，要重新导航）`
+        );
+      }
+      return out;
     } catch (e) {
       return textResult(e instanceof Error ? e.message : String(e), true);
     }

@@ -18,9 +18,28 @@ const DEFAULT_CALL_TIMEOUT_MS = 120_000;
 /** 拉起 daemon 后等它 bind 端口：每 1.5s 探一次，最多 ~18s */
 const UP_POLL_INTERVAL_MS = 1500;
 const UP_POLL_TRIES = 12;
+/**
+ * 上游浏览器连接的空闲阈值：本会话多久没碰某台机器的浏览器，就主动断开它（发 DELETE，
+ * 让那边关掉 browser context）。hub 会话本身照旧活着（2h 才回收），下次调用会自动重连——
+ * 只是页面要重新导航。
+ *
+ * 为什么要有这一层：mac 上的浏览器是有头的，每个会话的 context 就是屏幕上的一个窗口；
+ * 三分之一的 hub 会话是等到 2h 空闲回收才结束的（2026-08-19 从 journal 统计），
+ * 没有这层的话它们的窗口就在屏幕上留两个小时。
+ * 环境变量 BROWSER_HUB_UPSTREAM_IDLE_MIN 可改，0 = 不做。
+ */
+export const UPSTREAM_IDLE_MS = (() => {
+  const v = process.env.BROWSER_HUB_UPSTREAM_IDLE_MIN;
+  if (v === undefined || v === "") return 30 * 60 * 1000;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n * 60 * 1000 : 30 * 60 * 1000;
+})();
+/** 断开时给上游发 DELETE 的等待上限；发不出去就直接关本地连接，别卡住关闭流程 */
+const TERMINATE_TIMEOUT_MS = 3000;
 
 interface Conn {
   client: Client;
+  transport: StreamableHTTPClientTransport;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -37,7 +56,9 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 /** 连接层失效（上游 daemon 重启 / 隧道断了 / session 被回收） */
 function isConnectionError(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
-  return /not connected|connection closed|terminated|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|fetch failed|transport|mcp-session-id|initialize first/i.test(msg);
+  // "Session not found"：上游 daemon 重启过、旧 session id 它已经不认识（2026-08-19 实测漏了这条，
+  // 漏掉的后果是这条会话到那台机器的连接永远不丢弃、每次调用都报同一个错）
+  return /not connected|connection closed|terminated|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|fetch failed|transport|mcp-session-id|initialize first|session not found/i.test(msg);
 }
 
 function parseEndpoint(url: string): { host: string; port: number } {
@@ -98,11 +119,42 @@ export class BrowserClientManager {
   private version: string;
   /** 本会话在每台机器上最后一次调用的时间，给 status / 空闲判断用 */
   private lastUse: Map<string, number> = new Map();
+  /** 因空闲被主动断开、还没告诉过调用方的机器（下次调用时提示一句"页面要重新导航"） */
+  private idleDropped: Set<string> = new Set();
+  private idleTimer?: NodeJS.Timeout;
 
   constructor(nodes: BrowserNode[], hub: HubClientManager, version: string) {
     this.nodes = new Map(nodes.map((n) => [n.name, n]));
     this.hub = hub;
     this.version = version;
+    if (UPSTREAM_IDLE_MS > 0) {
+      const tick = Math.min(60_000, Math.max(5_000, Math.floor(UPSTREAM_IDLE_MS / 4)));
+      this.idleTimer = setInterval(() => this.sweepIdle(), tick);
+      if (typeof this.idleTimer.unref === "function") this.idleTimer.unref();
+    }
+  }
+
+  /** 空闲扫描：本会话太久没碰的上游连接主动断开（那边关 context、窗口消失） */
+  private sweepIdle(): void {
+    const now = Date.now();
+    for (const name of [...this.conns.keys()]) {
+      const last = this.lastUse.get(name) ?? now;
+      if (now - last > UPSTREAM_IDLE_MS) {
+        console.error(
+          `[mcp-ssh-pty:browser-hub] upstream idle ${Math.round((now - last) / 60000)}min, dropping ${name}`
+        );
+        this.drop(name);
+        this.idleDropped.add(name);
+      }
+    }
+  }
+
+  /**
+   * 取走"这台机器的上游连接刚因空闲被断开过"这个标记（只报一次）。
+   * 调用方拿到 true 时在结果前面加一句说明，免得模型对着"No open tabs"发懵。
+   */
+  takeIdleDroppedNote(name: string): boolean {
+    return this.idleDropped.delete(name);
   }
 
   listNodes(): BrowserNode[] {
@@ -120,6 +172,38 @@ export class BrowserClientManager {
   /** 本会话是否已经跟这台机器建立了上游连接（= 有一个活着的 browser context） */
   isConnected(name: string): boolean {
     return this.conns.has(name);
+  }
+
+  /**
+   * 看那台机器上实际跑的 daemon 是有头还是无头（进程参数里有没有 --headless）。
+   * 经 ssh 跑一条 ps，只在 status 里用（list 每次探三台太重）。windows 上没有 ps，返回 unknown。
+   * 用途：hub.json 里的 headed 只是声明，daemon 可能是 PW_HEADLESS=1 起的、或脚本没更新，
+   * 声明和实际不一致时 status 要能说出来。
+   */
+  async detectMode(name: string): Promise<"headed" | "headless" | "unknown"> {
+    const node = this.nodes.get(name);
+    if (!node) return "unknown";
+    if (!node.browser.via && !node.sshUrl && !node.sshLocal) return "unknown";
+    try {
+      const r = await this.hub.callTool(
+        node.browser.via ?? name,
+        "ssh",
+        {
+          server: node.browser.server ?? "local",
+          // 排除 tmux：tmux server 的 argv 会一直保留第一次 `tmux new -d -s pwmcp playwright-mcp …` 那串
+          // （包括早年的 --headless），不排掉就把它当成 daemon 了（2026-08-19 实测踩到）
+          command: "ps -axo args= | grep '[p]laywright-mcp --port' | grep -v '^tmux' | head -1",
+          timeout: 10,
+        },
+        { timeoutMs: 20_000 }
+      );
+      const c = r.content?.[0];
+      const out = c && c.type === "text" ? c.text : "";
+      if (!/playwright-mcp/.test(out)) return "unknown";
+      return /--headless/.test(out) ? "headless" : "headed";
+    } catch {
+      return "unknown";
+    }
   }
 
   /** 探上游 playwright daemon 的端口通不通 */
@@ -234,8 +318,9 @@ export class BrowserClientManager {
       await client.close().catch(() => {});
       throw e;
     }
-    const conn: Conn = { client };
+    const conn: Conn = { client, transport };
     this.conns.set(name, conn);
+    this.lastUse.set(name, Date.now());
     return conn;
   }
 
@@ -245,12 +330,21 @@ export class BrowserClientManager {
     return this.open(name);
   }
 
+  /**
+   * 丢弃到某台机器的上游连接。先给上游发 DELETE（SDK 的 terminateSession），让 playwright daemon
+   * 立刻关掉这个会话的 browser context——有头模式下就是屏幕上的窗口马上消失。
+   * 只 close() 不发 DELETE 的话，那边要靠心跳判死（0.0.79 实测 4~10 秒），0.0.75 则永远不关。
+   * DELETE 发不出去（隧道断了、daemon 死了）就算了，别让关闭流程卡住。
+   */
   private drop(name: string): void {
     const c = this.conns.get(name);
-    if (c) {
-      c.client.close().catch(() => {});
-      this.conns.delete(name);
-    }
+    if (!c) return;
+    this.conns.delete(name);
+    withTimeout(c.transport.terminateSession(), TERMINATE_TIMEOUT_MS, `通知 ${name} 结束会话`)
+      .catch(() => {})
+      .finally(() => {
+        c.client.close().catch(() => {});
+      });
   }
 
   /** 拉上游的工具清单，同时写进磁盘缓存供下次冷启动用 */
@@ -297,6 +391,7 @@ export class BrowserClientManager {
   }
 
   async closeAll(): Promise<void> {
+    if (this.idleTimer) clearInterval(this.idleTimer);
     for (const name of [...this.conns.keys()]) this.drop(name);
   }
 }

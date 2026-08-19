@@ -233,20 +233,24 @@ Clash 设为登录项（mini-2 实测没开自动登录 → 重启后卡锁屏�
 ### 5.3 给一台机器铺浏览器
 
 ```bash
-# 该机器上
+# 该机器上。@playwright/mcp 必须 >= 0.0.79：0.0.75 在 --isolated 下不释放已断开会话的 context
+# （有头=窗口留在屏幕上，无头=内存泄漏），pw-up.sh 会检查并提醒
 npm i -g @playwright/mcp@latest && npx --yes playwright install chromium
 # 三个脚本从已铺好的机器抄（air 是参照）：
-#   ~/.mori/pw-up.sh   起 daemon（isolated + storage-state，必须 tmux 起，不建隧道）
-#   ~/.mori/pw-down.sh 只停 daemon，不动隧道
+#   ~/.mori/pw-up.sh   起 daemon（默认有头 + isolated + storage-state，必须 tmux 起，不建隧道；
+#                      会先把旧进程杀干净再起、核对监听进程换了新的）
+#   ~/.mori/pw-down.sh 只停 daemon，不动隧道（按端口占用者杀到底，不只 tmux kill-session）
 #   ~/.mori/ssh/pw-tunnel.sh + com.mori.pw-tunnel.plist   独立 launchd 服务，端口按表改
 ```
+
+hub.json 的 `browser` 段给 mac 加 `"headed": true`（只影响给模型的提示，有头无头由 pw-up.sh 决定）。
 
 hub.json 给该节点加 `browser` 段（和 ssh 的节点定义共用一份，不用写两遍）：
 
 ```json
 "browser": { "url": "http://127.0.0.1:2778x/mcp",
              "up": "bash ~/.mori/pw-up.sh", "down": "bash ~/.mori/pw-down.sh",
-             "concurrency": 3, "logins": ["..."], "reach": ["公司内网"], "note": "..." }
+             "concurrency": 3, "headed": true, "logins": ["..."], "reach": ["公司内网"], "note": "..." }
 ```
 
 顶层 `browserRoutes` 是按 URL 选机器的规则。**`fallback` 只能指向已经铺好 `browser` 段的节点**，
@@ -304,5 +308,10 @@ hub.json 给该节点加 `browser` 段（和 ssh 的节点定义共用一份，�
 - **`pw-up.sh` 要自己解析 playwright-mcp 绝对路径**：三台装的位置不一样（air 在 homebrew、
   mini-2 在 nvm），tmux / launchd 的 PATH 不一定带得上。
 - mac 上没有 GNU `timeout`，诊断脚本里别用。
-- 想 headed 看浏览器：launchd 无 GUI 只能 headless，要 headed 走 `relogin.sh start`
-  （它就是 headful，用于人工登 SSO），或 `--cdp-endpoint` 连手开的 Chrome。
+- **mac 的 daemon 默认有头**（2026-08-19 起）：ssh daemon 跑在 launchd 的 gui 域、用户登着 console，
+  从 ssh-hub 的 tmux 里起的 Chrome 挂得上 WindowServer——早先"launchd 无 GUI 只能 headless"那句是错的。
+  要无头 `PW_HEADLESS=1 bash ~/.mori/pw-up.sh`；没人登图形会话时脚本自动退回无头。
+  windows 那台是 WMI 起的进程、拿不到桌面，仍是无头。
+- **重起 daemon 别只 `tmux kill-session`**：node 手里有 context 时收到 SIGHUP 不一定退，端口照占，
+  新起的报 EADDRINUSE 悄悄失败，而 `nc -z` 看到的 UP 是旧进程的——2026-08-19 就这么"升了 0.0.79、
+  跑的还是 0.0.75"验了半小时。新版 pw-up.sh / pw-down.sh 按"谁在监听 8930"杀到底、起完核对 pid。

@@ -101,11 +101,13 @@ Claude Code (VPS)  ←── MCP 地址永不变，不用再 /mcp 重连
 每台机器**只跑一个** playwright daemon，参数固定为：
 
 ```
-playwright-mcp --port 8930 --host 127.0.0.1 --headless \
+playwright-mcp --port 8930 --host 127.0.0.1 \
   --isolated \
   --storage-state ~/.mori/browser/state/company.json \
   --allowed-hosts "*"
 ```
+
+（2026-08-19 前这里还有 `--headless`；现在 mac 上默认**有头**，见第十五节。`PW_HEADLESS=1 bash ~/.mori/pw-up.sh` 起回无头。）
 
 - `--isolated`：每个连上来的 MCP client 各自一个内存 profile → 无限并发（受内存限制），互不干扰。
 - `--storage-state`：登录态从一个共享的只读 cookie 文件注入 → 每个会话都有登录态，而且**谁也弄不脏它**（内存 profile 用完即弃）。
@@ -202,7 +204,10 @@ browser_snapshot() / browser_evaluate({...}) / ...    // 原生工具，照常�
 
 这是唯一需要人参与的环节，一次登录管几天到几周。
 
-**初始化 / 刷新**（`browser_node({action:"relogin", node:"macbook-air"})` 打印步骤，人在 mac 上做）：
+**只是这一次要登录**（2026-08-19 起 daemon 有头）：让用户直接在 mac 屏幕上 agent 的那个窗口里登一次，
+agent `browser_wait_for` 等他登完继续。这样登进去的 cookie 只在本会话的内存 profile 里、不落盘。
+
+**初始化 / 刷新**（让以后每个会话都带上；`browser_node({action:"relogin", node:"macbook-air"})` 打印步骤，人在 mac 上做）：
 
 1. 在那台 mac 上起一个**独占的持久 profile daemon**，headful，`--user-data-dir` 显式固定为 `~/.mori/browser/profile/company`（不再让 hash 漂移）。
 2. 用户开盖，在弹出的浏览器里登一次 SSO。
@@ -247,7 +252,7 @@ await ctx.close();
 4. 验证 air 这个 node 端到端，包括并发（两个会话同时用 air 的浏览器）。
 5. **铺 mac-mini-2**：它现在是公网页面和家里内网的兜底机器，优先级跟 air 一样高（air 只管公司）。不需要公司登录态，隧道加一条 `-R 27783:127.0.0.1:8930` 即可。
 6. 铺 mac-mini-1（公司备用，air 离线时接手；它曾有过 HTTP 探活正常但起 shell 卡死的毛病，验的时候留意）。
-7. 改 skill `internal-web-via-mac`：删掉单活口和 `/mcp` 重连那两段，改成 `browser_node` 寻址。
+7. 改 skill `internal-web-via-mac`（2026-08-18 已改名 `browser-hub`）：删掉单活口和 `/mcp` 重连那两段，改成 `browser_node` 寻址。
 
 ---
 
@@ -334,7 +339,7 @@ mac-mini-2  →  80.251.218.180 IT7 洛杉矶         ← 搬瓦工，机房 IP
 1. `npm publish` + systemd 让 browser-hub 在 VPS 常驻，`claude mcp add browser-hub`，
    删掉老的 `playwright`（指向 8930 那个）。**这一步之后需要最后一次 `/mcp` 重连，往后再也不用。**
 2. 铺 mac-mini-1（公司备用），补上公司那条路由的 fallback。
-3. 改 skill `internal-web-via-mac`：删掉单活口和 `/mcp` 重连那两段，改成 `browser_node` 寻址。
+3. 改 skill `internal-web-via-mac`（2026-08-18 已改名 `browser-hub`）：删掉单活口和 `/mcp` 重连那两段，改成 `browser_node` 寻址。
 4. daemon 空闲自动回收还没做。目前靠 MCP 会话回收（2 小时）间接释放上游的 browser context。
 
 ### 两条别人踩过的坑（2026-08-17 从另一条线拿到的）
@@ -367,10 +372,13 @@ mac-mini-2  →  80.251.218.180 IT7 洛杉矶         ← 搬瓦工，机房 IP
 （`ssh({node:"vps", server:"windows-4070ti"})`）。原设计假设"每个 browser 节点自己有 ssh daemon、
 用 `server:"local"` 跑 up/down"，对它不成立。
 
-2.9.1 加了 `browserNodes`（顶层）+ `via`/`server` 来正确表达这件事。**但 2.9.1 还没发布**，
-所以当前是变通：把它放在 `nodes` 里、给一个占位 url（`http://127.0.0.1:1/mcp`，让 ssh-hub 的
-配置校验过关）、**不配 up/down**，daemon 改由任务计划 `MoriPwDaemon` 常驻
-（登录时 + 每 10 分钟，脚本幂等）。2.9.1 上线后可以挪回 `browserNodes` 并改回按需拉起。
+2.9.1 加了 `browserNodes`（顶层）+ `via`/`server` 来正确表达这件事。**2.9.1 最终没有发布**
+（版本号跳过了），这部分随 **2.9.2** 上线，2026-08-18 已全集群 rollout。
+
+当前 hub.json 仍是发布前的变通写法：把它放在 `nodes` 里、给一个占位 url
+（`http://127.0.0.1:1/mcp`，让 ssh-hub 的配置校验过关）、**不配 up/down**，daemon 由任务计划
+`MoriPwDaemon` 常驻（登录时 + 每 10 分钟，脚本幂等）。**现在已经可以挪回 `browserNodes` 了**
+（带 `via:"vps"` + `server:"windows-4070ti"`），挪完下面那个副作用就没有了 —— 待办。
 
 ⚠️ 副作用：`ssh({action:"list"})` 里会多一个永远显示离线的 `windows-4070ti`，note 里写明了原因。
 
@@ -427,3 +435,54 @@ mac-mini-2  →  80.251.218.180 IT7 洛杉矶         ← 搬瓦工，机房 IP
   **没有改它的全局配置**。
 - 写 PowerShell 脚本时，**变量后面紧跟中文标点会被当成变量名的一部分**
   （`"$Log："` 解析成变量 `Log：` 而报错），插值要写 `${Log}`。跟 bash 里 `$OUT（` 同一个坑。
+
+---
+
+## 十五、mac 改有头（2026-08-19）
+
+用户要的两件事：人要能在 mac 屏幕上看到 agent 在点什么、卡住时直接接手；有些站拦 headless。
+计划和查证过程在 `docs/browser-hub-headed-plan.md`，这里记结果。
+
+### 改了什么
+
+- 三台 mac 的 `~/.mori/pw-up.sh`：去掉 `--headless`，默认有头；`PW_HEADLESS=1` 起无头；本机没人登着
+  图形会话（`who` 里没有 console）时自动退回无头并说明。同时把"重起"做扎实：`tmux kill-session` 之后
+  按"谁在监听 8930"杀到底（SIGTERM → SIGKILL），起完核对监听 pid 换了新的、日志里没有 EADDRINUSE。
+  `pw-down.sh` 同样按端口占用者杀。旧版备份在 `~/.mori/pw-*.sh.bak-20260819`。
+- 三台 mac 的 `@playwright/mcp` 升到 **0.0.79**（air / mini-2 原来是 0.0.75）。
+- `hub.json` 三台 mac 的 `browser` 段加 `"headed": true`（只影响提示文字）。
+- mcp-ssh-pty **2.9.4**（`src/browser-hub.ts` / `browser-client.ts` / `browser-config.ts`）：
+  `browser_node` 的工具描述、`list` / `connect` / 首次自动路由 / `status` / `relogin` 都告诉模型
+  "窗口在那台 mac 的屏幕上、用户看得见、能接手，要人操作的地方说一声再 `browser_wait_for` 等"；
+  `status` 经 ssh 看进程参数，声明和实际不一致时明说；上游连接 30 分钟没用主动断开（窗口关掉，
+  下次调用自动重连并提示要重新导航，`BROWSER_HUB_UPSTREAM_IDLE_MIN` 可调）；`drop()` 先发 DELETE
+  再关；断连判断补上 `Session not found`。
+- air 的 `export-state.sh` 改用 `channel:'chrome'`（不再依赖包里捆的 chromium 版本）。
+
+### 查证出来的几件事（都是实测）
+
+- **有头从 ssh-hub 起得来**：ssh daemon 在 launchd `gui/501` 域、用户登着 console，tmux 里起的 Chrome
+  在 `lsappinfo` 里登记为 GUI app，页面自报窗口 1200×801、位于 (221,55)。合盖时 `screencapture` 拍不到、
+  `CGWindowList` 的坐标是陈旧的，别拿它们判断窗口在不在。
+- **0.0.75 泄漏 context**：`--isolated` 下 `disposed()` 只做 `clientCount--`，只要还有别的会话在就不关
+  这个会话的 context——心跳判死和 DELETE 都触发了 dispose，但窗口留到那台机器上所有会话都结束。
+  0.0.79 修了（isolated 时也 `browserContext.close()`）：硬断开 4 秒 `delete http session` → `close context`，
+  DELETE 即时。
+- **playwright-mcp 起的 Chrome 带 `--disable-blink-features=AutomationControlled` 和 `--disable-infobars`**：
+  `navigator.webdriver` 是 false、UA 是正常 Chrome/151、没有"受自动测试软件控制"的提示条。
+  反爬上比预想的好；代价是屏幕上分辨 agent 窗口只能靠"没书签栏、没登 Google 账号"。
+- **`tmux kill-session` 不保证 daemon 退出**：node 手里有 context 时收到 SIGHUP 没退，端口照占；
+  新起的报 EADDRINUSE 退出，`nc -z` 看到的 UP 是旧进程的。这次就这么"升了 0.0.79、跑的还是 0.0.75"
+  验了半小时才发现。
+- **browser-hub 会话有三分之一是等 2 小时空闲回收才结束的**（journal 统计 55 次里 19 次），
+  所以要有"上游 30 分钟没用就断开"这一层，否则窗口在屏幕上留两小时。
+- **MCP SDK 的 `client.close()` 不发 DELETE**，只中止连接；要 `terminateSession()` 才发。
+
+### 没做 / 留着
+
+- windows-4070ti 仍是无头（WMI 起的进程拿不到桌面，要改任务计划为交互式运行才行）。
+- 抢焦点：用户在 mac 前面干活时 agent 开新窗口会弹到前面，这是有头的固有代价；受不了就按机器配
+  （那台 `PW_HEADLESS=1`）。
+- 用户在 agent 窗口里登完 SSO 后用 `browser_run_code_unsafe` 跑 `page.context().storageState({path})`
+  顺手刷新 `company.json`——可以做，这次没做。
+

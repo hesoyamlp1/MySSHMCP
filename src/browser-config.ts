@@ -26,6 +26,13 @@ export interface BrowserSpec {
   server?: string;
   /** 同一台机器上允许的并发会话数；内存约束下的人工经验值，不是实测容量 */
   concurrency?: number;
+  /**
+   * 这台机器的浏览器是不是有头的（窗口开在它的屏幕上，用户看得见、能接手）。
+   * 只影响给模型的提示文字，不参与拉起命令——有头无头由那台机器的 pw-up.sh 决定
+   * （mac 默认有头，PW_HEADLESS=1 起无头）。三台 mac 填 true；windows 的 daemon 是
+   * WMI 起的、拿不到桌面，不填。声明和实际不一致时 browser_node status 会探出来。
+   */
+  headed?: boolean;
   /** 这台机器的 storageState 里有哪些站的登录态——给模型选机器时看的，不参与匹配 */
   logins?: string[];
   /** 这台机器能到哪些网络（公司内网 / 家里内网 / 公网） */
