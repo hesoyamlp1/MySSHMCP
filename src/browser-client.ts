@@ -37,6 +37,36 @@ export const UPSTREAM_IDLE_MS = (() => {
 /** 断开时给上游发 DELETE 的等待上限；发不出去就直接关本地连接，别卡住关闭流程 */
 const TERMINATE_TIMEOUT_MS = 3000;
 
+/**
+ * SSE 流断了之后的重连策略。
+ *
+ * 为什么要覆盖 SDK 默认值：上游 playwright-mcp（0.0.79）给每个 HTTP 会话跑心跳，每 3 秒 ping
+ * 一次客户端、5 秒不回就把这个会话删掉。ping 是服务端→客户端方向的消息，只能走客户端那条
+ * SSE 长连接，而这条连接要穿 VPS→mac 的反向隧道。SDK 默认断了只重连 2 次（1s、1.5s）就永久
+ * 放弃，于是隧道抖 2.5 秒以上 = SSE 再也不回来 = 5 秒后上游删会话，而 hub 这边毫无察觉
+ * （通知也走那条断了的流），直到下一次调用才拿到 404 Session not found。
+ * 2026-08-19 实测：60 分钟内会话被这样弄丢 4 次，每次都要人重新登录一遍目标站点。
+ * 改成退避重连约 4 分钟，覆盖隧道抖动和公司出网的坏窗口。
+ */
+const SSE_RECONNECT = {
+  initialReconnectionDelay: 1000,
+  maxReconnectionDelay: 15_000,
+  reconnectionDelayGrowFactor: 1.5,
+  maxRetries: 25,
+};
+
+/**
+ * 上游会话被判死、hub 自动重连之后，可以安全重放的工具：只读的，或者重放一次不会让同一个
+ * 动作发生两次的。点击、输入、提交这类不在里面——重连后页面状态跟调用方以为的不一样了。
+ */
+const REPLAY_SAFE = new Set([
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_take_screenshot",
+  "browser_console_messages",
+  "browser_network_requests",
+]);
+
 interface Conn {
   client: Client;
   transport: StreamableHTTPClientTransport;
@@ -121,6 +151,8 @@ export class BrowserClientManager {
   private lastUse: Map<string, number> = new Map();
   /** 因空闲被主动断开、还没告诉过调用方的机器（下次调用时提示一句"页面要重新导航"） */
   private idleDropped: Set<string> = new Set();
+  /** 每台机器上最后一次导航到的 URL：上游会话被判死后，重连时靠它回到原来那一页 */
+  private lastUrl: Map<string, string> = new Map();
   private idleTimer?: NodeJS.Timeout;
 
   constructor(nodes: BrowserNode[], hub: HubClientManager, version: string) {
@@ -331,7 +363,16 @@ export class BrowserClientManager {
     if (!node) throw new Error(`未知 node: ${name}`);
 
     const client = new Client({ name: "browser-hub", version: this.version }, { capabilities: {} });
-    const transport = new StreamableHTTPClientTransport(new URL(node.browser.url));
+    const transport = new StreamableHTTPClientTransport(new URL(node.browser.url), {
+      reconnectionOptions: SSE_RECONNECT,
+    });
+    // SSE 流出问题时 SDK 只通过 onerror 说一声（会话本身还"活着"，直到下次调用才发现上游已经
+    // 把它删了）。记下来，掉线之后能从 journal 对上时间点。
+    transport.onerror = (err: Error) => {
+      console.error(
+        `[mcp-ssh-pty:browser-hub] upstream stream error on ${name}: ${err.message}`
+      );
+    };
     try {
       await withTimeout(
         client.connect(transport),
@@ -380,14 +421,8 @@ export class BrowserClientManager {
     return tools;
   }
 
-  /**
-   * 在某台机器上调用一个 playwright 工具。
-   *
-   * 跟 ssh 那边不同：**连接断了不自动重发**。浏览器操作有副作用（点击、提交表单），
-   * 重发可能让同一个动作发生两次；而且上游 daemon 重启后 browser context 已经没了，
-   * 重发也不会回到原来的页面。所以这里丢弃连接、把话说清楚，让调用方自己决定重试。
-   */
-  async callTool(
+  /** 发一次调用，不做任何断线处理；顺手记下导航到哪一页了 */
+  private async callOnce(
     name: string,
     toolName: string,
     args: Record<string, unknown>,
@@ -395,20 +430,104 @@ export class BrowserClientManager {
   ): Promise<CallToolResult> {
     const conn = await this.getConn(name);
     this.lastUse.set(name, Date.now());
+    const r = (await conn.client.callTool(
+      { name: toolName, arguments: args },
+      undefined,
+      { timeout: opts?.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS }
+    )) as CallToolResult;
+    if (toolName === "browser_navigate" && typeof args.url === "string") {
+      this.lastUrl.set(name, args.url);
+    }
+    return r;
+  }
+
+  /**
+   * 上游会话被判死之后的自愈：重建连接、回到原来那一页，能安全重放的调用直接替调用方重放一次。
+   *
+   * 为什么需要它：上游 playwright-mcp 的心跳（见 SSE_RECONNECT 那段注释）会在网络抖动时
+   * 单方面删掉会话，hub 这边毫无察觉。原来的做法是把错误抛给调用方、让它自己
+   * browser_node({action:"connect"}) 重来一遍，实际用下来每次都要多花好几轮对话。
+   *
+   * 重连拿到的是一个全新的 browser context：cookie、localStorage、填了一半的表单全没了。
+   * 所以恢复到原 URL 之后必须把这件事说清楚，别让模型以为页面还是原样。
+   */
+  private async recoverAndRetry(
+    name: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    cause: unknown,
+    opts?: { timeoutMs?: number }
+  ): Promise<CallToolResult> {
+    const why = cause instanceof Error ? cause.message : String(cause);
+    console.error(
+      `[mcp-ssh-pty:browser-hub] upstream session lost on ${name} (${why}), reconnecting`
+    );
+    this.drop(name);
+
+    const back = this.lastUrl.get(name);
+    let restored = false;
     try {
-      return (await conn.client.callTool(
-        { name: toolName, arguments: args },
-        undefined,
-        { timeout: opts?.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS }
-      )) as CallToolResult;
+      await this.open(name);
+      if (back) {
+        await this.callOnce(name, "browser_navigate", { url: back }, { timeoutMs: 90_000 });
+        restored = true;
+      }
+    } catch (e) {
+      this.drop(name);
+      throw new Error(
+        `跟 ${name} 上的浏览器断开了（${why}），自动重连也没成功：` +
+          `${e instanceof Error ? e.message : String(e)}\n` +
+          `去看那台机器的 daemon 还在不在：browser_node({action:"status"})。`
+      );
+    }
+
+    const head =
+      `（跟 ${name} 上的浏览器断开了一次，已自动重连` +
+      (restored ? `并回到 ${back}` : "，当前是空白页") +
+      `。断开原因：${why}。\n` +
+      `注意这是一个全新的浏览器环境：之前登录过的站点要重新登录，填了一半的表单、` +
+      `打开的多个标签页都没了。)`;
+
+    if (REPLAY_SAFE.has(toolName)) {
+      const r = await this.callOnce(name, toolName, args, opts);
+      return {
+        ...r,
+        content: [{ type: "text", text: head + "\n\n" }, ...(r.content ?? [])],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            head +
+            `\n\n刚才那个 ${toolName} 没有执行——它会改变页面状态（点击、输入、提交这类），` +
+            `重连后的页面跟你以为的不一样，替你重发可能让同一个动作发生两次。` +
+            `先 browser_snapshot 看一眼现在是什么，再决定要不要重来。`,
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  /**
+   * 在某台机器上调用一个 playwright 工具。
+   *
+   * 连接层断了（上游把会话删了、daemon 重启、隧道断过）会自动重连并回到原来那一页；
+   * 只读和幂等的调用替调用方重放一次，会改变页面状态的调用不重放，如实说没执行。
+   */
+  async callTool(
+    name: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    opts?: { timeoutMs?: number }
+  ): Promise<CallToolResult> {
+    try {
+      return await this.callOnce(name, toolName, args, opts);
     } catch (e) {
       if (isConnectionError(e)) {
-        this.drop(name);
-        throw new Error(
-          `跟 ${name} 上的浏览器断开了（${e instanceof Error ? e.message : String(e)}）。\n` +
-            `没有自动重试——浏览器操作重发可能重复执行。那台机器的 daemon 多半重启了、` +
-            `原来的页面已经不在，重新 browser_node({action:"connect"}) 再从导航开始。`
-        );
+        return await this.recoverAndRetry(name, toolName, args, e, opts);
       }
       throw e;
     }

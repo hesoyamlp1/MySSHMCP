@@ -488,3 +488,60 @@ mac-mini-2  →  80.251.218.180 IT7 洛杉矶         ← 搬瓦工，机房 IP
 - 用户在 agent 窗口里登完 SSO 后用 `browser_run_code_unsafe` 跑 `page.context().storageState({path})`
   顺手刷新 `company.json`——可以做，这次没做。
 
+
+## 十六、浏览器会话被反复弄丢（2026-08-19 修）
+
+### 症状
+
+在一台 mac 上连续用浏览器干活，会话被单方面弄丢，任意一次 `browser_*` 调用返回
+`Session not found`。丢了之后页面回到空白、登录态全没，要重新 connect 再从导航开始。
+另一条线上的会话 2026-08-19 实测 60 分钟丢 5 次，因为目标站对"新设备"强制多因素验证，
+每次都要用户去邮箱取一遍验证码转给 agent——一次掉线 = 打断用户一次 + 至少 3 轮对话。
+
+### 根因：上游的会话心跳，5 秒判死
+
+playwright-mcp（0.0.79）给每个 HTTP 会话跑心跳，代码在
+`playwright-core/lib/coreBundle.js` 的 `startHeartbeat`：每 3 秒 `server.ping()` 一次，
+`defaultPingTimeout = 5e3` 毫秒内没回就 `server.close()`，`transport.onclose` 里
+`sessions.delete(sessionId)`。此后这个 session id 的任何请求都是 404 `Session not found`。
+
+ping 是服务端→客户端方向的消息，Streamable HTTP 下只能走客户端那条 standalone SSE 长连接，
+而这条连接要穿 VPS→mac 的反向隧道。MCP SDK 客户端（1.25.1）的 SSE 断了会重连，但
+`maxRetries: 2`、延迟 1s 和 1.5s，两次失败就永久放弃，只调一次 `onerror`。
+
+于是完整的因果链是：隧道抖动超过约 2.5 秒 → SSE 永久断 → ping 再也送不到 →
+5 秒后上游删掉会话 → hub 这边毫无察觉（通知也走那条断了的流）→ 调用方下次调用才拿到 404。
+hub 日志里没有对应的 `session closed`，正是因为 hub 自己的会话确实一直活着，
+死的是它到 mac 的上游会话。
+
+**实证**（在 mac-mini-2 上，不影响任何人）：用 curl 建一个不开 SSE 流的 session，
+发一次 `tools/call` 触发 backend（心跳是在第一次 tools/call 时才启动的，
+`tools/list` 不触发），等 12 秒再请求 → 404 Session not found，daemon 全程没重启。
+关掉心跳之后同样的流程等 20 秒 → 200。
+
+### 修法：两侧各一半
+
+**mac 侧（立刻生效，止血）**：`~/.mori/pw-up.sh` 起 daemon 时带
+`PLAYWRIGHT_MCP_PING_TIMEOUT_MS=0`，心跳整个不跑（`timeout <= 0` 时 `startHeartbeat` 直接 return）。
+三台 mac 的脚本已改成同一份。要恢复心跳：`PW_PING_TIMEOUT_MS=900000 bash ~/.mori/pw-up.sh`。
+
+代价：客户端非优雅消失时（browser-hub 进程被 kill -9），它留下的 context 不会被回收，
+有头模式下窗口留在屏幕上，要重跑 pw-up.sh 才清。日常路径不受影响——hub 结束会话、
+空闲断开、`down` 的时候都会主动发 DELETE。
+
+**hub 侧（2.9.5）**：
+- 给 `StreamableHTTPClientTransport` 传 `reconnectionOptions`，SSE 断了退避重连约 4 分钟
+  （SDK 默认那 2 次太少）；`transport.onerror` 记进 journal，掉线之后能对上时间点。
+- 记住每台机器最后一次 `browser_navigate` 的 URL。
+- 连接层断了不再直接抛错让调用方自己重来：自动重建上游会话、导航回原来那一页，
+  只读和幂等的调用（navigate / snapshot / take_screenshot / console_messages /
+  network_requests）替调用方重放一次；会改变页面状态的调用不重放，如实说"没执行"，
+  让它先 snapshot 看一眼再决定。重连拿到的是全新的 browser context，
+  所以恢复之后的说明里必须写清楚 cookie 和填了一半的表单都没了。
+
+### 没做：登录态落盘
+
+上面这些让"掉线"变便宜了，但没让它免费——重连是新 context，要重新登录。
+真正把代价降到零的是让登录态跨会话存活：daemon 已经支持 `--isolated --storage-state`
+（只读注入，见第八节），但目前只有公司 SSO 那一份 `company.json`，个人站点没有；
+而且登录之后产生的新 cookie 不会落盘。要做的话按「机器 + 站点」分开存，别跟 company.json 混。
