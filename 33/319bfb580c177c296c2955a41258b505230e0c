@@ -1,0 +1,21 @@
+docs/browser-hub.md
+  s_2dafe10bacbaa0::t_3092356b335766 459-461
+src/browser-client.ts
+  s_2dafe10bacbaa0::t_ca02d9110dc597 209-217,223,227-242
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "33319bfb580c177c296c2955a41258b505230e0c",
+  "prompts": {},
+  "sessions": {
+    "s_2dafe10bacbaa0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6227767-092c-4e78-b18a-40b4fb7faed9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
