@@ -1,0 +1,33 @@
+docs/browser-hub-headed-plan.md
+  s_2dafe10bacbaa0::t_94c7bf3ad0d3d1 1-136
+docs/browser-hub.md
+  s_2dafe10bacbaa0::t_8ae642239e80d3 104,110-111,207-210,255,342,375-381,438-488
+package-lock.json
+  s_2dafe10bacbaa0::t_a2046debc99d85 3,9
+package.json
+  s_2dafe10bacbaa0::t_714025136672e7 3
+skills/deploy-ssh-mcp/SKILL.md
+  s_2dafe10bacbaa0::t_1f31eb6a1436b3 236-237,240-242,246-247,253,311-317
+src/browser-client.ts
+  s_2dafe10bacbaa0::t_c93444f251eb9c 21-38,42,59-61,122-124,130-157,177-208,321,323,333-338,341-347,394
+src/browser-config.ts
+  s_2dafe10bacbaa0::t_3ab002a0f7bde9 29-35
+src/browser-hub.ts
+  s_2dafe10bacbaa0::t_c3386db83f5e2e 8,66-72,157-163,171,233,238,243,279-280,293-294,299-316,333,356-360,394,400,403-409,411
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "70ab81bc4e76e4f31af7f3168408d9c64f19b03e",
+  "prompts": {},
+  "sessions": {
+    "s_2dafe10bacbaa0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d6227767-092c-4e78-b18a-40b4fb7faed9",
+        "model": "unknown"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
