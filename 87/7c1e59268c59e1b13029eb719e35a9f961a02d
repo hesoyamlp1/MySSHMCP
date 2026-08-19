@@ -1,0 +1,23 @@
+docs/browser-hub.md
+  s_4e8ded36774655::t_51976c8786f1fb 491-547
+package.json
+  s_4e8ded36774655::t_a8814c8400d3fa 3
+src/browser-client.ts
+  s_4e8ded36774655::t_7a464e04b21263 40-69,154-155,366-375,424-513,517-518,527,530
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "877c1e59268c59e1b13029eb719e35a9f961a02d",
+  "prompts": {},
+  "sessions": {
+    "s_4e8ded36774655": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a9df0519-2b2b-446c-9418-7741947662ef",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
