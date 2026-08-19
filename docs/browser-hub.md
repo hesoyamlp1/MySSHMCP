@@ -456,7 +456,9 @@ mac-mini-2  →  80.251.218.180 IT7 洛杉矶         ← 搬瓦工，机房 IP
   "窗口在那台 mac 的屏幕上、用户看得见、能接手，要人操作的地方说一声再 `browser_wait_for` 等"；
   `status` 经 ssh 看进程参数，声明和实际不一致时明说；上游连接 30 分钟没用主动断开（窗口关掉，
   下次调用自动重连并提示要重新导航，`BROWSER_HUB_UPSTREAM_IDLE_MIN` 可调）；`drop()` 先发 DELETE
-  再关；断连判断补上 `Session not found`。
+  再关；断连判断补上 `Session not found`；**`probe` 从"TCP 能不能 connect"改成"发一个不留 session 的
+  POST 看有没有 HTTP 响应"**——原来 daemon 不在时反向隧道的 sshd 也 accept，hub 以为它在跑、跳过 pw-up.sh、
+  直接 fetch failed，"connect 时自动拉起"从来没真正生效过（`down` 之后、mac 重启后都会碰到）。
 - air 的 `export-state.sh` 改用 `channel:'chrome'`（不再依赖包里捆的 chromium 版本）。
 
 ### 查证出来的几件事（都是实测）

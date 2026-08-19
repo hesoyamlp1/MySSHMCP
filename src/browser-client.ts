@@ -206,15 +206,39 @@ export class BrowserClientManager {
     }
   }
 
-  /** 探上游 playwright daemon 的端口通不通 */
+  /**
+   * 探上游 playwright daemon 在不在。
+   *
+   * 只 TCP connect 是不够的：browser.url 是 VPS 上反向隧道的端口，sshd 先 accept 再去连 mac 的 8930，
+   * 那头没人听时这边 connect 也是成功的（2026-08-19 实测：down 之后 connect 报 "fetch failed"，
+   * 因为 probe 说"已在运行"、跳过了 pw-up.sh——mac 重启后隧道回来 daemon 没回来也是同一回事）。
+   * 所以 TCP 通了再发一个不留 session 的请求：POST 空 body 会被 406 拒掉，
+   * 拿到任何 HTTP 响应都说明 daemon 活着；被 sshd 直接关掉就是 daemon 不在。
+   */
   async probe(name: string): Promise<boolean | undefined> {
     const node = this.nodes.get(name);
     if (!node) return undefined;
     try {
       const { host, port } = parseEndpoint(node.browser.url);
-      return await probeTcp(host, port);
+      if (!(await probeTcp(host, port))) return false;
     } catch {
       return undefined;
+    }
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 2500);
+    try {
+      const r = await fetch(node.browser.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+        signal: ctrl.signal,
+      });
+      await r.body?.cancel().catch(() => {});
+      return true;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(t);
     }
   }
 
