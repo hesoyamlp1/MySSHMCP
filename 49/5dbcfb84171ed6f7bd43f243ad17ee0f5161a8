@@ -1,0 +1,19 @@
+src/hub.ts
+  s_46ad2d9139ebc7::t_8f40f3c7a15475 20-30,49-56,58-62,66-89,91-94,102-103,109-112
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "495dbcfb84171ed6f7bd43f243ad17ee0f5161a8",
+  "prompts": {},
+  "sessions": {
+    "s_46ad2d9139ebc7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "016c0c3b-8826-4085-9515-f06cdeac0391",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
