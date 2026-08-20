@@ -1,0 +1,21 @@
+scripts/filter-company-state.cjs
+  s_46ad2d9139ebc7::t_9ea413a445f227 1-47
+scripts/refresh-state.sh
+  s_46ad2d9139ebc7::t_c273c78177b7d4 1-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "d1d5d7ca5d0ba8f661316f1206a21e3114091d25",
+  "prompts": {},
+  "sessions": {
+    "s_46ad2d9139ebc7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "016c0c3b-8826-4085-9515-f06cdeac0391",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
