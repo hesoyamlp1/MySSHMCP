@@ -358,6 +358,37 @@ export class BrowserClientManager {
     return c && c.type === "text" ? c.text.slice(0, 600) : `已在 ${name} 上执行 down`;
   }
 
+  /**
+   * 让那台机器自己从持久 profile 重导一次登录态（company.json）。
+   *
+   * 为什么值得先自动试一次：company.json 是持久 profile 的快照、会过期，而持久 profile 里
+   * 往往还登着——那种情况下重导一下就好了，不用惊动人。全都失效了才需要人登一次 SSO。
+   * 这跟 tc-wiki / tc-langfuse / tc-configcenter 的 bootstrap 是同一套路数。
+   *
+   * 退出码约定跟那些 bootstrap 对齐：0 重导成功 / 2 所有 profile 都失效要人工 / 其它是错误。
+   * 靠脚本自己在末尾打 __RC=<n> 拿退出码，不去解析 ssh 工具返回文本里的 [exit N] 标记。
+   */
+  async refreshState(name: string): Promise<{ rc: number; detail: string }> {
+    const node = this.nodes.get(name);
+    if (!node) throw new Error(`未知 node: ${name}`);
+    const via = node.browser.via ?? name;
+    if (!node.browser.via && !node.sshUrl && !node.sshLocal) {
+      return { rc: -1, detail: `${name} 既没有自己的 ssh 端点也没写 browser.via，没法在它上面跑命令。` };
+    }
+    const cmd = "bash ~/.mori/browser/refresh-state.sh; echo __RC=$?";
+    const r = await this.hub.callTool(
+      via,
+      "ssh",
+      { server: node.browser.server ?? "local", command: cmd, timeout: 120 },
+      { timeoutMs: 150_000 }
+    );
+    const c = r.content?.[0];
+    const text = c && c.type === "text" ? c.text : "";
+    const m = text.match(/__RC=(\d+)/);
+    const rc = m ? Number(m[1]) : -1;
+    return { rc, detail: text.replace(/__RC=\d+\s*/, "").trim().slice(0, 900) };
+  }
+
   private async open(name: string): Promise<Conn> {
     const node = this.nodes.get(name);
     if (!node) throw new Error(`未知 node: ${name}`);

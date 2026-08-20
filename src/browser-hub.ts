@@ -350,28 +350,59 @@ export function buildBrowserHubServer(
       if (!name) throw new Error("relogin 要指定 node");
       const n = mgr.getNode(name);
       if (!n) throw new Error(`未知机器 '${name}'`);
+
+      // 先自动试一次：company.json 只是持久 profile 的快照，过期时 profile 里往往还登着，
+      // 重导一下就好，不用惊动人。全都失效了才需要人登一次 SSO。
+      const { rc, detail } = await mgr.refreshState(name);
+
+      if (rc === 0) {
+        return textResult({
+          机器: name,
+          结果: "登录态已经自动刷新好了，不用麻烦用户",
+          做了什么: "在那台机器上跑 refresh-state.sh：从还登着的持久 profile 重导 company.json，并按域白名单裁掉非公司的 cookie",
+          下一步: `browser_node({action:"down", node:"${name}"}) 再 connect，新登录态即生效`,
+          输出: detail,
+        });
+      }
+
+      const 人工步骤 = [
+        `1. 用户在 ${name} 上开盖（headful 浏览器要有图形会话，合盖看不到窗口）`,
+        `2. 先看这台有哪些 profile、哪个碰过公司的站：bash ~/.mori/browser/list-profiles.sh`,
+        `3. 起浏览器：bash ~/.mori/browser/relogin.sh start <后缀>`,
+        `   后缀必须带——脚本默认写死 33da8b6，那是 macbook-air 上管家那份，别的机器没有这个目录，直接跑会报「没有这个 profile」`,
+        `4. 在弹出的浏览器里登一次 SSO`,
+        `5. 登完跑：bash ~/.mori/browser/relogin.sh finish <后缀>`,
+        `   它导出 company.json（权限 600）、按域白名单裁一刀、关掉那个独占的持久 profile`,
+        `6. 回来跑 browser_node({action:"down", node:"${name}"}) 再 connect，新登录态即生效`,
+      ];
+
+      if (rc === 2) {
+        return textResult({
+          机器: name,
+          结果: "自动重导没成功：这台机器所有持久 profile 都没有有效的公司登录态了，只能人工登一次",
+          先试更省事的:
+            n.browser.headed
+              ? "这台机器的浏览器是有头的：只是这一次要登录的话，直接让用户在屏幕上那个窗口里登一次，然后 browser_wait_for 等他登完继续。" +
+                "这样登进去的 cookie 只在本会话的内存 profile 里、不落盘；要让以后每个会话都带上，才走下面的步骤。"
+              : "（这台机器是无头的，只能走下面的步骤）",
+          步骤: 人工步骤,
+          注意: [
+            "relogin 期间那个持久 profile 被独占，这台机器上的 tc-* skill 读它会报「被占用」，finish 之后恢复",
+            "storageState 只带 cookie，不带 localStorage——靠 localStorage 存 token 的站这样注入不全",
+            "那个 json 是明文 SSO cookie：权限 600、不入 git、不跨机传（要哪台有登录态就在哪台上登）",
+          ],
+          当前声明的登录态: n.browser.logins ?? "（未配置）",
+          自动重导的输出: detail,
+        });
+      }
+
       return textResult({
         机器: name,
-        为什么要人工:
-          "登录态是一份 storageState（cookie）文件，isolated 浏览器从它注入。刷新它要真的登一次 SSO。",
-        先试更省事的:
-          n.browser.headed
-            ? `这台机器的浏览器是有头的：只是这一次要登录的话，直接让用户在屏幕上你那个窗口里登一次，然后 browser_wait_for 等他登完继续。` +
-              `这样登进去的 cookie 只在本会话的内存 profile 里、不落盘；要让以后每个会话都带上，才走下面的步骤。`
-            : "（这台机器是无头的，只能走下面的步骤）",
-        步骤: [
-          `1. 用户在 ${name} 上开盖（headful 浏览器要有图形会话）`,
-          `2. 在那台机器上跑：bash ~/.mori/browser/relogin.sh`,
-          `   它起一个独占的持久 profile（--user-data-dir ~/.mori/browser/profile/company）、headful`,
-          `3. 在弹出的浏览器里登一次 SSO`,
-          `4. 脚本导出 storageState 到 ~/.mori/browser/state/company.json（权限 600）并关掉持久 daemon`,
-          `5. 回来跑 browser_node({action:"down", node:"${name}"}) 再 connect，新登录态即生效`,
-        ],
-        注意: [
-          "storageState 只带 cookie，不带 localStorage——靠 localStorage 存 token 的站这样注入不全",
-          "那个 json 是明文 SSO cookie：权限 600、不入 git、不跨机传",
-        ],
-        当前声明的登录态: n.browser.logins ?? "（未配置）",
+        结果: `自动重导跑不起来（退出码 ${rc}）`,
+        可能的原因: "那台机器上没装 refresh-state.sh，或者没有 sqlite3 / playwright 缓存目录",
+        怎么装: "把仓库 scripts/refresh-state.sh 和 scripts/filter-company-state.cjs 复制到那台机器的 ~/.mori/browser/ 下",
+        退回人工: 人工步骤,
+        输出: detail,
       });
     }
 
