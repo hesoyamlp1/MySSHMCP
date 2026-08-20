@@ -17,6 +17,17 @@ function firstText(result: CallToolResult): string | undefined {
   return undefined;
 }
 
+/** GET /health 的等待上限：daemon 卡死时别把整个 list 拖住 */
+const HEALTH_TIMEOUT_MS = 2500;
+
+/** probeNode 的结果：online 之外，顺带带回 /health 报的版本和会话数 */
+interface NodeHealth {
+  online: boolean | undefined;
+  version?: string;
+  activeSessions?: number;
+  uptimeSec?: number;
+}
+
 /**
  * 构造 hub 模式的 MCP server：对 Claude 只露一个 ssh / sftp，
  * 内部按 node 路由到各 mac daemon。
@@ -35,18 +46,52 @@ export function buildHubServer(mgr: HubClientManager, version: string): McpServe
     .optional()
     .describe("目标机器（hub node 名，如 mac1/mac2）。不传则沿用当前 node；connect 时带上即把当前 node 切到它");
 
-  /** 探一个 node 是否在线：local 永远在线；远程探 HTTP 端口能否连上 */
-  async function probeNode(name: string): Promise<boolean | undefined> {
+  /**
+   * 探一个 node 的死活。两段：
+   * 1. TCP 试连它的 HTTP 端口——不通就是隧道断了 / 机器睡了，400ms 快速失败。
+   * 2. 端口通了再 GET /health——端口在 listen 不代表 daemon 还能干活（反向隧道
+   *    活着但 daemon 卡死时，只探端口会报 online、实际一调就超时）。/health 在
+   *    鉴权之前返回，不用带 token，顺带给出版本和活跃会话数。
+   */
+  async function probeNode(name: string): Promise<NodeHealth> {
     const node = mgr.getNode(name);
-    if (!node) return undefined;
-    if (node.local) return true;
-    if (!node.url) return undefined;
+    if (!node) return { online: undefined };
+    if (node.local) return { online: true, version };
+    if (!node.url) return { online: undefined };
+
+    let healthUrl: string;
     try {
       const u = new URL(node.url);
       const port = Number(u.port) || (u.protocol === "https:" ? 443 : 80);
-      return await probeTcp(u.hostname, port);
+      if (!(await probeTcp(u.hostname, port))) return { online: false };
+      healthUrl = new URL("/health", u).toString();
     } catch {
-      return undefined;
+      return { online: undefined };
+    }
+
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), HEALTH_TIMEOUT_MS);
+    try {
+      const r = await fetch(healthUrl, { signal: ctrl.signal });
+      if (!r.ok) return { online: false };
+      const h = (await r.json()) as {
+        ok?: boolean;
+        version?: string;
+        activeSessions?: number;
+        uptimeSec?: number;
+      };
+      if (!h.ok) return { online: false };
+      return {
+        online: true,
+        version: h.version,
+        activeSessions: h.activeSessions,
+        uptimeSec: h.uptimeSec,
+      };
+    } catch {
+      // 端口在 listen 但 /health 不响应 = daemon 半死，按离线报，别让模型以为能用
+      return { online: false };
+    } finally {
+      clearTimeout(t);
     }
   }
 
@@ -54,12 +99,17 @@ export function buildHubServer(mgr: HubClientManager, version: string): McpServe
   async function hubList(): Promise<CallToolResult> {
     const entries = await Promise.all(
       mgr.listNodes().map(async (n) => {
-        const online = await probeNode(n.name);
+        const health = await probeNode(n.name);
+        const online = health.online;
         const entry: Record<string, unknown> = {
           node: n.name,
           online,
           current: n.name === state.currentNode,
         };
+        // 只在真拿到时才带这几个字段：恒空的占位字段比没有更容易误导
+        if (health.version) entry.version = health.version;
+        if (health.activeSessions !== undefined) entry.activeSessions = health.activeSessions;
+        if (health.uptimeSec !== undefined) entry.uptimeSec = health.uptimeSec;
         if (n.note) entry.note = n.note; // hub.json 里的简短标注，离线也显示
         if (online) {
           // best-effort：拉该 node 自己的 server 列表（local + 它的内网机）。
