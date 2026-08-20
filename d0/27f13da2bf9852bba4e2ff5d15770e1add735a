@@ -1,0 +1,21 @@
+src/browser-client.ts
+  s_46ad2d9139ebc7::t_9b8f4ad6759645 361-391
+src/browser-hub.ts
+  s_46ad2d9139ebc7::t_983b798b8d8e31 353-398,401-405
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "d027f13da2bf9852bba4e2ff5d15770e1add735a",
+  "prompts": {},
+  "sessions": {
+    "s_46ad2d9139ebc7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "016c0c3b-8826-4085-9515-f06cdeac0391",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
