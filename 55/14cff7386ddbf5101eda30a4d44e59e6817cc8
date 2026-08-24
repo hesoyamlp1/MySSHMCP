@@ -1,0 +1,21 @@
+src/browser-client.ts
+  s_0adb2778f8a4f4::t_d254f85e7f0d5e 173-174,191,497-508
+src/shell-manager.ts
+  s_0adb2778f8a4f4::t_8e2e001b9e0936 436-438,445-463
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "5514cff7386ddbf5101eda30a4d44e59e6817cc8",
+  "prompts": {},
+  "sessions": {
+    "s_0adb2778f8a4f4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "62d1d091-68ed-4d7b-8e03-0865b9245294",
+        "model": "claude-fable-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
