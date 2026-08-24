@@ -1,0 +1,33 @@
+docs/resource-leak-audit.md
+  s_0adb2778f8a4f4::t_469d7c34bb3d65 1-109
+src/browser-client.ts
+  s_0adb2778f8a4f4::t_f8ca63742625d9 40-51,169-172,194,362,409,431-432,436-440,446-451,453-460,469,471,473,522-524,529,540,600,602,604
+src/exec-runner.ts
+  s_0adb2778f8a4f4::t_7d5573afd26d26 105-125,265-283,335-336
+src/hub-client.ts
+  s_0adb2778f8a4f4::t_d2607ab87e01f6 10-12,20-21,56-69,80-83,100,103,113,120-133,136-139,145-149,151-153,155-160,163-164,166-168,188-189,191,199-201,203,209,211-212
+src/index.ts
+  s_0adb2778f8a4f4::t_faa6582b5f2671 105,118-127,239-241,265,280-287,327-330,332-338,399,475
+src/sftp-manager.ts
+  s_0adb2778f8a4f4::t_94106dcb3ec013 26-27,65-66,68,77,79,84-85
+src/shell-manager.ts
+  s_0adb2778f8a4f4::t_c0af01dc409edc 15-19,45-49,58-65,153,158-159,164-177,179,181-185,304,355-358,365,383
+src/ssh-manager.ts
+  s_0adb2778f8a4f4::t_24a22a265c21a3 117-119,165-170,189-191,226,232,261,308-315,334-336,361,367
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "f09f68ee7520225c51c22f5b5bfbae93a70d7705",
+  "prompts": {},
+  "sessions": {
+    "s_0adb2778f8a4f4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "62d1d091-68ed-4d7b-8e03-0865b9245294",
+        "model": "claude-fable-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
