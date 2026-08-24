@@ -1,0 +1,19 @@
+docs/resource-leak-audit.md
+  s_0adb2778f8a4f4::t_ea0f9a853cc394 38,75-90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "d9a84bf7270906c1c0c686b285fc8398ca8470f4",
+  "prompts": {},
+  "sessions": {
+    "s_0adb2778f8a4f4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "62d1d091-68ed-4d7b-8e03-0865b9245294",
+        "model": "claude-fable-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
