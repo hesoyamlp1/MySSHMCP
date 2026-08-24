@@ -433,11 +433,33 @@ export class ShellManager {
     const startTime = Date.now();
     let lastCheckTime = startTime;
     let stableCount = 0;
+    // 记住等的是哪条 shell：等待期间它被关掉（disconnect / reset_shell / 连接断）时 this.shell 会变，
+    // 不看它的话这个循环要空等到 maxTimeout（最长 300 秒），而且回去的结果是「超时」不是「shell 已关」
+    const stream = this.shell;
 
     return new Promise((resolve) => {
       const check = setInterval(() => {
         const elapsed = Date.now() - startTime;
         const timeSinceLastOutput = Date.now() - this.lastOutputTime;
+
+        if (this.shell !== stream) {
+          clearInterval(check);
+          const partial = this.outputLines.slice(startLineCount);
+          const r = this.buildResult({
+            rawNewLines: partial,
+            trailingBuffer: this.outputBuffer,
+            totalLines: partial.length,
+            complete: false,
+            truncated: false,
+            slow: elapsed > config.quickTimeout,
+            waiting: false,
+            sentinelMarker: sentinelNonce,
+            echoInput,
+          });
+          r.message = "shell 在等待期间被关掉了（disconnect / reset_shell / 连接断），命令没等到结束；上面是关掉之前收到的输出";
+          resolve(r);
+          return;
+        }
 
         const newLines = this.outputLines.slice(startLineCount);
 

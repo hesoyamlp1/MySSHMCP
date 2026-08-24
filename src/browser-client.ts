@@ -170,6 +170,8 @@ export class BrowserClientManager {
   private opening: Map<string, Promise<Conn>> = new Map();
   /** closeAll 之后置位：不再建连、不再自愈重连 */
   private closed = false;
+  /** 每台机器上正在处理的请求数：有在飞请求的连接不算空闲（browser_wait_for 等 40 分钟不能被空闲扫描断掉） */
+  private inflight: Map<string, number> = new Map();
 
   constructor(nodes: BrowserNode[], hub: HubClientManager, version: string) {
     this.nodes = new Map(nodes.map((n) => [n.name, n]));
@@ -186,6 +188,7 @@ export class BrowserClientManager {
   private sweepIdle(): void {
     const now = Date.now();
     for (const name of [...this.conns.keys()]) {
+      if ((this.inflight.get(name) ?? 0) > 0) continue; // 有请求在飞就不是空闲
       const last = this.lastUse.get(name) ?? now;
       if (now - last > UPSTREAM_IDLE_MS) {
         console.error(
@@ -491,11 +494,18 @@ export class BrowserClientManager {
   ): Promise<CallToolResult> {
     const conn = await this.getConn(name);
     this.lastUse.set(name, Date.now());
-    const r = (await conn.client.callTool(
-      { name: toolName, arguments: args },
-      undefined,
-      { timeout: opts?.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS }
-    )) as CallToolResult;
+    this.inflight.set(name, (this.inflight.get(name) ?? 0) + 1);
+    let r: CallToolResult;
+    try {
+      r = (await conn.client.callTool(
+        { name: toolName, arguments: args },
+        undefined,
+        { timeout: opts?.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS }
+      )) as CallToolResult;
+    } finally {
+      this.inflight.set(name, Math.max(0, (this.inflight.get(name) ?? 1) - 1));
+      this.lastUse.set(name, Date.now()); // 请求结束再刷一次：长等待结束后从这一刻起算空闲
+    }
     if (toolName === "browser_navigate" && typeof args.url === "string") {
       this.lastUrl.set(name, args.url);
     }
