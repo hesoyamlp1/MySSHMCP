@@ -1,0 +1,19 @@
+src/hub-client.ts
+  s_0adb2778f8a4f4::t_3c625986594df1 83,86-95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "35d6bb1036a25ff86a52f1814bf79f8566c6a796",
+  "prompts": {},
+  "sessions": {
+    "s_0adb2778f8a4f4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "62d1d091-68ed-4d7b-8e03-0865b9245294",
+        "model": "claude-fable-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
