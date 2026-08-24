@@ -80,10 +80,19 @@ export class HubClientManager {
     if (node.local) {
       // in-process：把一份直连 server 用内存管道接给 client
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-      const { server } = buildDirectServer(this.version);
+      const { server, sshManager } = buildDirectServer(this.version);
       await server.connect(serverTransport);
       await client.connect(clientTransport);
-      const conn: Conn = { client, closeExtra: () => server.close() };
+      // 回收这个会话时必须把这份 SSHManager 一起断开。只关 McpServer 的话，它手里最后连的那台
+      // 机器的 ssh 连接会一直留到 daemon 退出：2026-08-23 采样器每 10 分钟经 vps 节点连一次搬瓦工，
+      // 61 小时堆了 365 条，那台 1G 的机器被 746 个 sshd-session 压到 OOM 反复杀 v2ray。
+      const conn: Conn = {
+        client,
+        closeExtra: async () => {
+          await sshManager.disconnect().catch(() => {});
+          await server.close();
+        },
+      };
       this.conns.set(node.name, conn);
       return conn;
     }
