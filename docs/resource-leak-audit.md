@@ -96,12 +96,26 @@ hub 模式里 vps 节点是 in-process 直连 server（一份 SSHManager），�
 | stdio 形态喂 initialize + connect 野草云后关 stdin | 新代码立刻退出；老代码 20 秒不退 |
 | POST 一个没有 params 的 initialize | 日志出现 `initialize failed, discarding half-built session` |
 
-## 没修的和原因
+## 遗留四处的处理（用户 2026-08-23 定）
 
-- **hub 24 小时 idle 阈值**：要先验证 Claude Code 拿到 404 之后会不会自动重新 initialize；会的话可以降到 1~2 小时。这是行为改动，等用户定。
-- **`hubList` 在每台 mac 上留会话**：有界（随本会话结束发 DELETE），改成用 `/health` 取信息是另一件事。
-- **sentinel 等待不感知 shell 关闭**、**`browser_wait_for` 超过 30 分钟被 idle 判死**：不占资源，是体验问题。
-- **execLocal 不改 detached 进程组**：见上表。
+- **hub 24 小时 idle 阈值**：先验证了 Claude Code 对 404 的反应，见下一节。
+- **`hubList` 在每台 mac 上留会话**：不改。有界（随本会话结束发 DELETE），只是 mac daemon 的 activeSessions 数字偏高。
+- **sentinel 等待不感知 shell 关闭**：已修（5514cff）。等待循环记住等的是哪条 shell，它被关掉就立刻返回并说明。实测 pty 里 `sleep 100`（timeout 90）在 reset_shell 后 3.0 秒返回。
+- **`browser_wait_for` 超过 30 分钟被 idle 判死**：已修（5514cff）。按机器计数在飞请求，`sweepIdle` 跳过有请求在飞的连接；请求结束再刷一次 `lastUse`。
+- **execLocal 不改 detached 进程组**：见上表，维持。
+
+## Claude Code 对会话被回收（404）的反应
+
+验证方法：用全局装的 2.9.5 起临时 hub `--idle-min 1`（端口 27797），写一份只含它的 mcp-config，
+`claude -p --model haiku --strict-mcp-config` 跑一段固定步骤：调 `ssh list` → Bash `sleep 330` → 再调 `ssh list`。
+
+结果：hub 日志 `reaping idle session … (idle 285s)` → `session closed` → 紧接着 `session opened`（新 id）；
+Claude 的报告 STEP3 是 SUCCESS，跟 STEP1 返回一样，没有任何错误经过模型。
+对照 Claude Code 客户端代码：POST 拿到 404 走 `session_expired_404`，「clearing connection cache for re-initialization」，
+只有 SSE GET 流的 404 不触发重新初始化（`get_stream_404_not_reinit`）。
+
+所以降 hub 的 idle 阈值对使用者是透明的。真正的代价只有一个：被回收的会话里的状态没了——当前 node、连着的 server、
+PTY shell 的 cwd 和环境。回收之后第一次 `ssh({command})` 会收到「未连接服务器，请先 connect」，模型照提示重连一次即可。
 
 ## 排查时的判据
 
