@@ -11,7 +11,7 @@
 
 三条退出路径：
 - **A** 客户端发 DELETE /mcp（SDK 处理 → `transport.close()` → `transport.onclose` → 该会话的 `close()`）
-- **B** idle reap（index.ts 的 sweepTimer 每 5 分钟扫，超过阈值调 `transport.close()`，之后同 A）。阈值：直连 daemon 30 分钟，ssh-hub / browser-hub 24 小时
+- **B** idle reap（index.ts 的 sweepTimer 每 5 分钟扫，超过阈值调 `transport.close()`，之后同 A）。阈值：直连 daemon 和 ssh-hub 30 分钟（ssh-hub 原来 24 小时，2026-08-23 改），browser-hub 2 小时
 - **C** 客户端非优雅断开（Claude 进程被杀、隧道断）。StreamableHTTP 是逐请求的，服务端察觉不到，只能等 B
 
 hub 模式里 vps 节点是 in-process 直连 server（一份 SSHManager），其它节点是经 HTTP 连远程 daemon 的 MCP client；
@@ -98,7 +98,7 @@ hub 模式里 vps 节点是 in-process 直连 server（一份 SSHManager），�
 
 ## 遗留四处的处理（用户 2026-08-23 定）
 
-- **hub 24 小时 idle 阈值**：先验证了 Claude Code 对 404 的反应，见下一节。
+- **hub 24 小时 idle 阈值**：先验证了 Claude Code 对 404 的反应（见下一节），用户定降到 **30 分钟**，跟直连 daemon 一致（index.ts 的 `defaultIdleMs`，随 2.9.6 生效）。
 - **`hubList` 在每台 mac 上留会话**：不改。有界（随本会话结束发 DELETE），只是 mac daemon 的 activeSessions 数字偏高。
 - **sentinel 等待不感知 shell 关闭**：已修（5514cff）。等待循环记住等的是哪条 shell，它被关掉就立刻返回并说明。实测 pty 里 `sleep 100`（timeout 90）在 reset_shell 后 3.0 秒返回。
 - **`browser_wait_for` 超过 30 分钟被 idle 判死**：已修（5514cff）。按机器计数在飞请求，`sweepIdle` 跳过有请求在飞的连接；请求结束再刷一次 `lastUse`。

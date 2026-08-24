@@ -306,8 +306,8 @@ async function serveHttp(opts: HttpOptions, spec: HttpServeSpec): Promise<void> 
 
   // 回收 idle session：客户端非优雅断开（Claude 重启 / 反向隧道断）时 transport.onclose
   // 不触发，session 会连同它的 SSHManager 泄漏。定期扫描，关掉久无活动的。
-  // 阈值按模式定：直连 daemon 默认 30 分钟；hub 默认 24 小时（Claude 会话经常空半小时以上，
-  // 回收了它下次 ssh 就得重新 initialize；hub 会话本身很小，下游 daemon 有自己的回收）。
+  // 阈值按模式定：直连 daemon 和 ssh-hub 都是 30 分钟，browser-hub 2 小时。回收之后客户端拿 404
+  // 会自己重新 initialize（Claude Code 验过），只是会话里的 node / server / PTY 状态没了。
   const SESSION_SWEEP_MS = 5 * 60 * 1000;  // 每 5 分钟扫一次
   const sweepTimer = idleMs > 0
     ? setInterval(() => {
@@ -375,7 +375,10 @@ async function startHubServer(argv: string[]): Promise<void> {
     console.error(`[mcp-ssh-pty:ssh-hub] hub mode (http): ${cfg.nodes.length} node(s): ${nodeNames}`);
     await serveHttp(httpOpts, {
       name: "ssh-hub",
-      defaultIdleMs: 24 * 60 * 60 * 1000,
+      // 30 分钟，跟直连 daemon 一致（原来 24 小时）。Claude Code 拿到 404 会自己重新 initialize，
+      // 回收对使用者透明，代价只是空闲超过阈值之后要多一次 connect；而 24 小时是 2026-08-23
+      // 搬瓦工 OOM 那次「365 条泄漏连接」的放大器之一。用户 2026-08-23 定的。
+      defaultIdleMs: 30 * 60 * 1000,
       makeServer: () => {
         const mgr = new HubClientManager(cfg.nodes, PKG_VERSION);
         return { server: buildHubServer(mgr, PKG_VERSION), close: () => mgr.closeAll() };
