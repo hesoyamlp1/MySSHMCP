@@ -12,6 +12,11 @@ export interface SendOptions {
   interactive?: boolean;
 }
 
+/** 没换行的尾巴最多留多少字符（进度条类输出会一直不换行） */
+const MAX_PARTIAL_LINE_CHARS = 64 * 1024;
+/** outputLines 总量上限（字符数），超了从头丢 */
+const MAX_TOTAL_CHARS = 8 * 1024 * 1024;
+
 const DEFAULT_CONFIG: ShellConfig = {
   quickTimeout: 2000,
   maxTimeout: 5000,
@@ -37,6 +42,11 @@ export class ShellManager {
   private config: ShellConfig;
   private isLocal: boolean = false;
 
+  /** 正在开的那次 open，给并发调用复用 */
+  private opening: Promise<void> | null = null;
+  /** outputLines 里所有行加起来的字节数（按 JS 字符串长度算），给总量上限用 */
+  private outputBytes = 0;
+
   constructor(config?: Partial<ShellConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
@@ -45,6 +55,14 @@ export class ShellManager {
    * 打开远程 PTY Shell（在 SSH 连接成功后调用）
    */
   async open(client: Client): Promise<void> {
+    // 并发两次 open（一条消息里几个 pty 调用并行）只开一条：不去重的话第二条覆盖 this.shell，
+    // 第一条没人关，而且两条的输出都写进同一个缓冲
+    if (this.opening) return this.opening;
+    this.opening = this.openOnce(client).finally(() => { this.opening = null; });
+    return this.opening;
+  }
+
+  private openOnce(client: Client): Promise<void> {
     return new Promise((resolve, reject) => {
       client.shell(
         { term: "xterm-256color", rows: 40, cols: 120 },
@@ -132,23 +150,39 @@ export class ShellManager {
   private setupStream(stream: ShellStream): void {
     this.outputBuffer = "";
     this.outputLines = [];
+    this.outputBytes = 0;
     this.lastOutputTime = Date.now();
 
     // 监听数据事件
     stream.on("data", (data: Buffer) => {
+      // reset 后旧通道晚到的输出别混进新 shell 的缓冲
+      if (this.shell !== stream) return;
       const text = data.toString();
       this.outputBuffer += text;
       this.lastOutputTime = Date.now();
 
-      // 按行分割并存储
-      const lines = this.outputBuffer.split("\n");
-      // 最后一个可能是不完整的行，保留在 buffer
-      this.outputBuffer = lines.pop() || "";
-      this.outputLines.push(...lines);
+      // 按行分割并存储；最后一段可能是不完整的行，留在 buffer
+      const nl = this.outputBuffer.lastIndexOf("\n");
+      if (nl >= 0) {
+        const lines = this.outputBuffer.slice(0, nl).split("\n");
+        this.outputBuffer = this.outputBuffer.slice(nl + 1);
+        for (const l of lines) {
+          this.outputLines.push(l);
+          this.outputBytes += l.length;
+        }
+      }
+      // 没换行的尾巴（进度条那种 \r 刷新的输出全在这里）只留最后一段，不然它无界增长
+      if (this.outputBuffer.length > MAX_PARTIAL_LINE_CHARS) {
+        this.outputBuffer = this.outputBuffer.slice(-MAX_PARTIAL_LINE_CHARS);
+      }
 
-      // 限制缓冲区大小
+      // 限制缓冲区大小：行数上限 + 总字节上限，从头丢
       if (this.outputLines.length > this.config.maxBufferLines) {
-        this.outputLines = this.outputLines.slice(-this.config.maxBufferLines);
+        const dropped = this.outputLines.splice(0, this.outputLines.length - this.config.maxBufferLines);
+        for (const l of dropped) this.outputBytes -= l.length;
+      }
+      while (this.outputBytes > MAX_TOTAL_CHARS && this.outputLines.length > 1) {
+        this.outputBytes -= this.outputLines.shift()!.length;
       }
     });
 
@@ -267,6 +301,7 @@ export class ShellManager {
 
     if (clear) {
       this.outputLines = [];
+      this.outputBytes = 0;
       this.outputBuffer = "";
     }
 
@@ -317,13 +352,17 @@ export class ShellManager {
    */
   async hardReset(reopen: () => Promise<void>): Promise<void> {
     if (this.shell) {
-      try { this.shell.end(); } catch { /* ignore */ }
+      // end() 只发 EOF：前台程序不读 stdin（sleep / tail -f / 卡住的构建）时远端进程和通道都还活着。
+      // close() 发 CHANNEL_CLOSE，sshd 会给那个会话 SIGHUP，通道也真的关掉。
+      const old = this.shell as unknown as { close?: () => void; end: () => void };
+      try { typeof old.close === "function" ? old.close() : old.end(); } catch { /* ignore */ }
     }
     this.disposePty();
     this.shell = null;
     this.ptyProcess = null;
     this.outputBuffer = "";
     this.outputLines = [];
+    this.outputBytes = 0;
     await reopen();
   }
 
@@ -341,6 +380,7 @@ export class ShellManager {
       this.ptyProcess = null;
     }
     this.outputLines = [];
+    this.outputBytes = 0;
     this.outputBuffer = "";
     this.isLocal = false;
   }

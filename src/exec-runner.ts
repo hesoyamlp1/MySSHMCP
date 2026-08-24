@@ -102,7 +102,27 @@ export function execRemote(
       const timer = setTimeout(() => {
         timedOut = true;
         try { stream.signal("KILL"); } catch { /* 部分 sshd 不支持 signal，吃掉 */ }
-        try { stream.end(); } catch { /* */ }
+        // end() 只发 EOF，exec 通道是 allowHalfOpen 的，远端进程不退通道就一直开着——
+        // 这条通道、两个 data 监听和收集到的字符串都挂到远端退出或连接断。close() 发 CHANNEL_CLOSE，
+        // sshd 收到会关掉会话侧的管道（进程再写就是 SIGPIPE）。
+        try { stream.close(); } catch { /* */ }
+        if (settled) return;
+        // 超时就按「不再等」落地：把已经收到的输出立刻返回，别等 close 事件（远端进程不退它就不来）。
+        settled = true;
+        stream.removeAllListeners("data");
+        stream.stderr.removeAllListeners("data");
+        stream.resume();
+        stream.stderr.resume();
+        resolve({
+          stdout,
+          stderr,
+          exitCode: null,
+          signal: undefined,
+          timedOut,
+          truncated,
+          bytesStdout,
+          bytesStderr,
+        });
       }, timeoutMs);
 
       stream.on("data", (d: Buffer) => {
@@ -242,6 +262,25 @@ export function execLocal(
     const timer = setTimeout(() => {
       timedOut = true;
       try { child.kill("SIGKILL"); } catch { /* */ }
+      // SIGKILL 只杀 bash -c 那个 shell；它的子孙进程还握着 stdout/stderr 管道时 close 事件不来。
+      // 给 1 秒收尾，然后销毁管道（子孙再写就是 SIGPIPE）、按超时落地，别让这个 Promise 挂着。
+      const settleTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { child.stdout?.destroy(); } catch { /* */ }
+        try { child.stderr?.destroy(); } catch { /* */ }
+        resolve({
+          stdout,
+          stderr,
+          exitCode: null,
+          signal: "SIGKILL",
+          timedOut,
+          truncated,
+          bytesStdout,
+          bytesStderr,
+        });
+      }, 1000);
+      if (typeof settleTimer.unref === "function") settleTimer.unref();
     }, timeoutMs);
 
     child.stdout?.on("data", (d: Buffer) => {
@@ -293,6 +332,8 @@ export function execLocal(
     });
 
     if (hasStdin) {
+      // 命令没读完 stdin 就退出时这里会收到 EPIPE；没有 error 监听它就是未捕获异常，会把整个 daemon 打崩
+      child.stdin?.on("error", () => { /* 命令提前退出，stdin 剩下的不要了 */ });
       child.stdin?.end(options.stdin);
     }
   });

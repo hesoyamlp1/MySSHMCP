@@ -114,7 +114,9 @@ export class SSHManager {
       });
 
       client.on("error", (err) => {
-        this.cleanup();
+        // 只有还是当前连接才 cleanup：换 server 后旧连接晚到的 error（握手超时之类）别把新连接一起关了
+        if (this.client === client) this.cleanup();
+        else { try { client.end(); } catch { /* ignore */ } }
         reject(err);
       });
 
@@ -160,6 +162,12 @@ export class SSHManager {
     return new Promise((resolve, reject) => {
       const client = new Client();
       this.client = client;
+      // 还没 connect() 就放弃（凭据读不到）：代理 socket 已经通了要销毁，this.client 也别留着一个没连的对象
+      const abandon = (msg: string) => {
+        if (config.proxy) { try { proxySocket.socket.destroy(); } catch { /* ignore */ } }
+        if (this.client === client) this.client = null;
+        reject(new Error(msg));
+      };
 
       client.on("ready", async () => {
         // 检查是否已被 cleanup（竞态保护）
@@ -178,7 +186,9 @@ export class SSHManager {
       });
 
       client.on("error", (err) => {
-        this.cleanup();
+        // 只有还是当前连接才 cleanup：换 server 后旧连接晚到的 error（握手超时之类）别把新连接一起关了
+        if (this.client === client) this.cleanup();
+        else { try { client.end(); } catch { /* ignore */ } }
         reject(err);
       });
 
@@ -213,13 +223,13 @@ export class SSHManager {
             connectConfig.passphrase = config.passphrase;
           }
         } catch (error) {
-          reject(new Error(`无法读取私钥文件: ${config.privateKeyPath}`));
+          abandon(`无法读取私钥文件: ${config.privateKeyPath}`);
           return;
         }
       } else if (config.password) {
         connectConfig.password = config.password;
       } else {
-        reject(new Error("必须提供 password 或 privateKeyPath"));
+        abandon("必须提供 password 或 privateKeyPath");
         return;
       }
 
@@ -248,6 +258,7 @@ export class SSHManager {
           (err, stream) => {
             if (err) {
               jumpClient.end();
+              if (this.jumpClient === jumpClient) this.jumpClient = null;
               reject(new Error(`跳板机隧道创建失败: ${err.message}`));
             } else {
               resolve(stream);
@@ -294,6 +305,14 @@ export class SSHManager {
     return new Promise((resolve, reject) => {
       const client = new Client();
       this.client = client;
+      // 第二跳还没 connect() 就放弃（凭据读不到）：跳板已经 ready、forwardOut 通道已开，
+      // 不关的话这条到跳板的 TCP 留到 daemon 退出；isConnected 为假，之后没有任何路径会来关它
+      const abandonJump = (msg: string) => {
+        try { jumpClient.end(); } catch { /* ignore */ }
+        if (this.jumpClient === jumpClient) this.jumpClient = null;
+        if (this.client === client) this.client = null;
+        reject(new Error(msg));
+      };
 
       client.on("ready", async () => {
         // 检查是否已被 cleanup（竞态保护）
@@ -312,7 +331,9 @@ export class SSHManager {
       });
 
       client.on("error", (err) => {
-        this.cleanup();
+        // 只有还是当前连接才 cleanup：换 server 后旧连接晚到的 error（握手超时之类）别把新连接一起关了
+        if (this.client === client) this.cleanup();
+        else { try { client.end(); } catch { /* ignore */ } }
         reject(err);
       });
 
@@ -337,13 +358,13 @@ export class SSHManager {
             connectConfig.passphrase = config.passphrase;
           }
         } catch (error) {
-          reject(new Error(`无法读取私钥文件: ${config.privateKeyPath}`));
+          abandonJump(`无法读取私钥文件: ${config.privateKeyPath}`);
           return;
         }
       } else if (config.password) {
         connectConfig.password = config.password;
       } else {
-        reject(new Error("必须提供 password 或 privateKeyPath"));
+        abandonJump("必须提供 password 或 privateKeyPath");
         return;
       }
 

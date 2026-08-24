@@ -102,6 +102,7 @@ async function startStdioServer(): Promise<void> {
   };
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  onStdinEnd(cleanup);
 }
 
 /**
@@ -112,6 +113,16 @@ async function startStdioServer(): Promise<void> {
 interface ConnectableServer {
   connect(transport: StreamableHTTPServerTransport): Promise<void>;
   close(): Promise<void>;
+}
+
+/**
+ * stdio 形态：父进程（Claude Code）被 SIGKILL 时子进程收不到任何信号，只有 stdin 到 EOF；
+ * SDK 的 StdioServerTransport 只监听 stdin 的 data/error，不监听 end，所以 transport.onclose 不会触发，
+ * ssh2 的 keepalive 定时器会把进程一直撑着——连同它手里的 ssh 连接。这里补上。
+ */
+function onStdinEnd(cleanup: () => Promise<void>): void {
+  process.stdin.on("end", () => { cleanup().catch(() => process.exit(0)); });
+  process.stdin.on("close", () => { cleanup().catch(() => process.exit(0)); });
 }
 
 interface Session {
@@ -225,6 +236,9 @@ async function serveHttp(opts: HttpOptions, spec: HttpServeSpec): Promise<void> 
       const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
 
       let session: Session | undefined;
+      // 这次请求是不是新建的会话：initialize 没成功（畸形请求、协议版本不对、握手中抛错）时
+      // 它不会进 sessions，得在这里把 makeServer 起的东西关掉，否则 manager 里的定时器会让它常驻
+      let fresh = false;
 
       if (sessionId && sessions.has(sessionId)) {
         session = sessions.get(sessionId);
@@ -248,6 +262,7 @@ async function serveHttp(opts: HttpOptions, spec: HttpServeSpec): Promise<void> 
         };
         await server.connect(transport);
         session = { transport, server, close, lastActivity: Date.now() };
+        fresh = true;
       } else {
         // 规范：带了 session id 但服务端不认识 → 404，客户端应重新 initialize
         // （守护进程重启、或空闲会话被回收之后就是这种情况）
@@ -262,7 +277,14 @@ async function serveHttp(opts: HttpOptions, spec: HttpServeSpec): Promise<void> 
       }
 
       session!.lastActivity = Date.now();
-      await session!.transport.handleRequest(req, res, parsedBody);
+      try {
+        await session!.transport.handleRequest(req, res, parsedBody);
+      } finally {
+        if (fresh && !session!.transport.sessionId) {
+          console.error(`[mcp-ssh-pty:${spec.name}] initialize failed, discarding half-built session`);
+          session!.close().catch(() => {});
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const stack = err instanceof Error ? err.stack : undefined;
@@ -302,12 +324,18 @@ async function serveHttp(opts: HttpOptions, spec: HttpServeSpec): Promise<void> 
 
   const cleanup = async () => {
     if (sweepTimer) clearInterval(sweepTimer);
-    await new Promise<void>((r) => httpServer.close(() => r()));
-    for (const sess of sessions.values()) {
-      await sess.transport.close().catch(() => {});
-      await sess.close().catch(() => {});
-    }
+    // 先关会话（给下游发 DELETE、断 ssh），再关 HTTP 服务。反过来会卡在 httpServer.close() 上：
+    // 它要等所有连接断开才回调，而挂着 SSE 长连接的会话永远不断，15 秒后被 systemd SIGKILL，
+    // 会话清理一行都跑不到——下游 daemon 收不到 DELETE，只能等各自的 idle 回收。
+    const all = [...sessions.values()];
     sessions.clear();
+    console.error(`[mcp-ssh-pty:${spec.name}] shutting down, closing ${all.length} session(s)`);
+    await Promise.allSettled(all.map(async (sess) => {
+      await sess.close().catch(() => {});
+      await sess.transport.close().catch(() => {});
+    }));
+    httpServer.close();
+    httpServer.closeAllConnections();
     process.exit(0);
   };
   process.on("SIGINT", cleanup);
@@ -368,6 +396,7 @@ async function startHubServer(argv: string[]): Promise<void> {
   };
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  onStdinEnd(cleanup);
 }
 
 /**
@@ -443,6 +472,7 @@ async function startBrowserHubServer(argv: string[]): Promise<void> {
   };
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  onStdinEnd(cleanup);
 }
 
 /**

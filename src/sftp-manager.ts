@@ -23,6 +23,8 @@ const BLOCKED_UPLOAD_PATTERNS = [
 
 export class SFTPManager {
   private sftp: SFTPWrapper | null = null;
+  /** 正在开的那次 sftp 通道，给并发调用复用 */
+  private opening: Promise<SFTPWrapper> | null = null;
 
   /**
    * 校验本地路径安全性
@@ -60,8 +62,10 @@ export class SFTPManager {
     if (this.sftp) {
       return this.sftp;
     }
+    // 并发两次首次调用只开一条通道：不去重的话第二条覆盖 this.sftp，第一条没人关
+    if (this.opening) return this.opening;
 
-    return new Promise((resolve, reject) => {
+    this.opening = new Promise<SFTPWrapper>((resolve, reject) => {
       client.sftp((err, sftp) => {
         if (err) {
           reject(new Error(`无法创建 SFTP 通道: ${err.message}`));
@@ -70,14 +74,15 @@ export class SFTPManager {
 
         this.sftp = sftp;
 
-        // 监听关闭事件
+        // 监听关闭事件（守卫：别把后来开的那条误清掉）
         sftp.on("close", () => {
-          this.sftp = null;
+          if (this.sftp === sftp) this.sftp = null;
         });
 
         resolve(sftp);
       });
-    });
+    }).finally(() => { this.opening = null; });
+    return this.opening;
   }
 
   /**

@@ -38,6 +38,18 @@ export const UPSTREAM_IDLE_MS = (() => {
 const TERMINATE_TIMEOUT_MS = 3000;
 
 /**
+ * 关一条上游连接：先给上游发 DELETE（SDK 的 terminateSession），让 playwright daemon 立刻关掉这个
+ * 会话的 browser context——有头模式下就是屏幕上的窗口马上消失；再 close() 本地。
+ * 只 close() 不发 DELETE 的话，那边要靠心跳判死（0.0.79 实测 4~10 秒），0.0.75 则永远不关。
+ * DELETE 发不出去（隧道断了、daemon 死了）就算了，别让关闭流程卡住。顺序不能反：close() 会把
+ * terminateSession 用的 abort 信号一起打掉。
+ */
+async function closeConn(name: string, c: Conn): Promise<void> {
+  await withTimeout(c.transport.terminateSession(), TERMINATE_TIMEOUT_MS, `通知 ${name} 结束会话`).catch(() => {});
+  await c.client.close().catch(() => {});
+}
+
+/**
  * SSE 流断了之后的重连策略。
  *
  * 为什么要覆盖 SDK 默认值：上游 playwright-mcp（0.0.79）给每个 HTTP 会话跑心跳，每 3 秒 ping
@@ -154,6 +166,10 @@ export class BrowserClientManager {
   /** 每台机器上最后一次导航到的 URL：上游会话被判死后，重连时靠它回到原来那一页 */
   private lastUrl: Map<string, string> = new Map();
   private idleTimer?: NodeJS.Timeout;
+  /** 正在建的上游连接，按机器名去重：并发两次 getConn 只建一条 */
+  private opening: Map<string, Promise<Conn>> = new Map();
+  /** closeAll 之后置位：不再建连、不再自愈重连 */
+  private closed = false;
 
   constructor(nodes: BrowserNode[], hub: HubClientManager, version: string) {
     this.nodes = new Map(nodes.map((n) => [n.name, n]));
@@ -175,7 +191,7 @@ export class BrowserClientManager {
         console.error(
           `[mcp-ssh-pty:browser-hub] upstream idle ${Math.round((now - last) / 60000)}min, dropping ${name}`
         );
-        this.drop(name);
+        void this.drop(name);
         this.idleDropped.add(name);
       }
     }
@@ -343,7 +359,7 @@ export class BrowserClientManager {
   async down(name: string): Promise<string> {
     const node = this.nodes.get(name);
     if (!node) throw new Error(`未知 node: ${name}`);
-    this.drop(name);
+    void this.drop(name);
     const cmd = node.browser.down;
     if (!cmd) {
       return `${name} 的 browser 段没配 down 命令，只断开了本会话的连接，daemon 还在那台机器上跑着。`;
@@ -390,6 +406,7 @@ export class BrowserClientManager {
   }
 
   private async open(name: string): Promise<Conn> {
+    if (this.closed) throw new Error(`会话已关闭，不再连 ${name} 的浏览器`);
     const node = this.nodes.get(name);
     if (!node) throw new Error(`未知 node: ${name}`);
 
@@ -411,19 +428,36 @@ export class BrowserClientManager {
         `连接 ${name} 的 playwright daemon`
       );
     } catch (e) {
-      await client.close().catch(() => {});
+      // 握手超时时上游可能已经建好了 session（开了 context）：先 DELETE 再关，别留半连接
+      await closeConn(name, { client, transport });
       throw e;
     }
     const conn: Conn = { client, transport };
+    if (this.closed) {
+      // 建连期间会话被关了：closeAll 已经跑过、不会再来 drop 这条，自己关掉
+      await closeConn(name, conn);
+      throw new Error(`会话已关闭，不再连 ${name} 的浏览器`);
+    }
     this.conns.set(name, conn);
     this.lastUse.set(name, Date.now());
     return conn;
   }
 
-  private async getConn(name: string): Promise<Conn> {
+  /**
+   * 取到某台机器的上游连接：已有的直接用；正在建的等同一个 Promise。
+   * 不去重的话并发两次调用（一条消息里几个 browser_* 并行、或 tools/list 撞上首个调用）会建两条上游
+   * session，后建的 conns.set 覆盖先建的，先建那条没人 drop、上游 ping 又有人答，context 就永远留着。
+   */
+  private getConn(name: string): Promise<Conn> {
     const existing = this.conns.get(name);
-    if (existing) return existing;
-    return this.open(name);
+    if (existing) return Promise.resolve(existing);
+    const inflight = this.opening.get(name);
+    if (inflight) return inflight;
+    const p = this.open(name).finally(() => {
+      if (this.opening.get(name) === p) this.opening.delete(name);
+    });
+    this.opening.set(name, p);
+    return p;
   }
 
   /**
@@ -432,15 +466,11 @@ export class BrowserClientManager {
    * 只 close() 不发 DELETE 的话，那边要靠心跳判死（0.0.79 实测 4~10 秒），0.0.75 则永远不关。
    * DELETE 发不出去（隧道断了、daemon 死了）就算了，别让关闭流程卡住。
    */
-  private drop(name: string): void {
+  private drop(name: string): Promise<void> {
     const c = this.conns.get(name);
-    if (!c) return;
+    if (!c) return Promise.resolve();
     this.conns.delete(name);
-    withTimeout(c.transport.terminateSession(), TERMINATE_TIMEOUT_MS, `通知 ${name} 结束会话`)
-      .catch(() => {})
-      .finally(() => {
-        c.client.close().catch(() => {});
-      });
+    return closeConn(name, c);
   }
 
   /** 拉上游的工具清单，同时写进磁盘缓存供下次冷启动用 */
@@ -489,11 +519,14 @@ export class BrowserClientManager {
     cause: unknown,
     opts?: { timeoutMs?: number }
   ): Promise<CallToolResult> {
+    // 会话自己在关：closeAll 把上游连接 close 掉，在飞的请求以 "Connection closed" 失败进到这里。
+    // 这时候重连会建出一条 closeAll 之后没人回收的上游 session（有头 mac 上就是一个关不掉的窗口）
+    if (this.closed) throw cause;
     const why = cause instanceof Error ? cause.message : String(cause);
     console.error(
       `[mcp-ssh-pty:browser-hub] upstream session lost on ${name} (${why}), reconnecting`
     );
-    this.drop(name);
+    void this.drop(name);
 
     const back = this.lastUrl.get(name);
     let restored = false;
@@ -504,7 +537,7 @@ export class BrowserClientManager {
         restored = true;
       }
     } catch (e) {
-      this.drop(name);
+      void this.drop(name);
       throw new Error(
         `跟 ${name} 上的浏览器断开了（${why}），自动重连也没成功：` +
           `${e instanceof Error ? e.message : String(e)}\n` +
@@ -564,8 +597,10 @@ export class BrowserClientManager {
     }
   }
 
+  /** 关掉本会话到所有机器的上游连接。之后这个 manager 不再建连、不再自愈重连 */
   async closeAll(): Promise<void> {
+    this.closed = true;
     if (this.idleTimer) clearInterval(this.idleTimer);
-    for (const name of [...this.conns.keys()]) this.drop(name);
+    await Promise.allSettled([...this.conns.keys()].map((n) => this.drop(n)));
   }
 }

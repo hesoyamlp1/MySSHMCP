@@ -7,7 +7,9 @@ import { buildDirectServer } from "./server-factory.js";
 
 interface Conn {
   client: Client;
-  /** 额外清理（local 节点要顺带关掉 in-process server） */
+  /** 远程节点的 transport：关连接时要经它给对方发 DELETE */
+  transport?: StreamableHTTPClientTransport;
+  /** 额外清理（local 节点要顺带关掉 in-process server 和它的 SSHManager） */
   closeExtra?: () => Promise<void>;
 }
 
@@ -15,6 +17,8 @@ interface Conn {
 const CONNECT_TIMEOUT_MS = 6000;
 /** 没带命令 timeout 的普通调用沿用 SDK 默认 60s */
 const DEFAULT_CALL_TIMEOUT_MS = 60000;
+/** 关连接时给下游发 DELETE 的等待上限；发不出去就直接关本地，别卡住关闭流程 */
+const TERMINATE_TIMEOUT_MS = 3000;
 
 /** 给一个 promise 套超时；超时 reject，不取消底层操作（底层会被随后的 drop 清掉） */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -50,6 +54,20 @@ function isConnectionError(e: unknown): boolean {
 }
 
 /**
+ * 关一条下游连接。远程节点先给对方发 DELETE（SDK 的 terminateSession）再 close()：
+ * Client.close() 只 abort 本地的 SSE 流、不通知对方，mac 上那份 session 和它的 SSHManager
+ * 得等那边 30 分钟的 idle 回收才释放。DELETE 发不出去（隧道断了、daemon 死了）就算了。
+ * 顺序不能反：close() 会把 terminateSession 用的 abort 信号一起打掉。
+ */
+async function closeConn(c: Conn): Promise<void> {
+  if (c.transport) {
+    await withTimeout(c.transport.terminateSession(), TERMINATE_TIMEOUT_MS, "结束下游会话").catch(() => {});
+  }
+  await c.client.close().catch(() => {});
+  await c.closeExtra?.().catch(() => {});
+}
+
+/**
  * 管理 hub → 各下游节点的 MCP 连接。
  * - 远程节点：StreamableHTTP client 连到 mac daemon（带 Bearer）
  * - 本地节点：InMemoryTransport 直接连一份 in-process 直连 server（VPS 自己）
@@ -59,6 +77,10 @@ function isConnectionError(e: unknown): boolean {
 export class HubClientManager {
   private nodes: Map<string, HubNode>;
   private conns: Map<string, Conn> = new Map();
+  /** 正在建的连接，按 node 名去重：并发两次 getConn 只建一条 */
+  private opening: Map<string, Promise<Conn>> = new Map();
+  /** closeAll 之后置位：不再建连、不再重连重发 */
+  private closed = false;
   private version: string;
 
   constructor(nodes: HubNode[], version: string) {
@@ -75,8 +97,10 @@ export class HubClientManager {
   }
 
   private async open(node: HubNode): Promise<Conn> {
+    if (this.closed) throw new Error(`会话已关闭，不再连 node '${node.name}'`);
     const client = new Client({ name: "ssh-hub", version: "0" }, { capabilities: {} });
 
+    let conn: Conn;
     if (node.local) {
       // in-process：把一份直连 server 用内存管道接给 client
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -86,48 +110,62 @@ export class HubClientManager {
       // 回收这个会话时必须把这份 SSHManager 一起断开。只关 McpServer 的话，它手里最后连的那台
       // 机器的 ssh 连接会一直留到 daemon 退出：2026-08-23 采样器每 10 分钟经 vps 节点连一次搬瓦工，
       // 61 小时堆了 365 条，那台 1G 的机器被 746 个 sshd-session 压到 OOM 反复杀 v2ray。
-      const conn: Conn = {
+      conn = {
         client,
         closeExtra: async () => {
           await sshManager.disconnect().catch(() => {});
           await server.close();
         },
       };
-      this.conns.set(node.name, conn);
-      return conn;
+    } else {
+      const transport = new StreamableHTTPClientTransport(new URL(node.url!), {
+        requestInit: node.token
+          ? { headers: { Authorization: `Bearer ${node.token}` } }
+          : undefined,
+      });
+      try {
+        await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `连接 node '${node.name}'`);
+      } catch (e) {
+        // 握手超时时对方可能已经建好了 session：按正常路径关（先 DELETE 再 close），别留半连接
+        await closeConn({ client, transport }).catch(() => {});
+        throw e;
+      }
+      conn = { client, transport };
     }
 
-    const transport = new StreamableHTTPClientTransport(new URL(node.url!), {
-      requestInit: node.token
-        ? { headers: { Authorization: `Bearer ${node.token}` } }
-        : undefined,
-    });
-    try {
-      await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `连接 node '${node.name}'`);
-    } catch (e) {
-      await client.close().catch(() => {}); // 半连接别泄漏
-      throw e;
+    if (this.closed) {
+      // 建连期间会话被关了：closeAll 已经跑过、不会再来 drop 这条，自己关掉
+      await closeConn(conn).catch(() => {});
+      throw new Error(`会话已关闭，不再连 node '${node.name}'`);
     }
-    const conn: Conn = { client };
     this.conns.set(node.name, conn);
     return conn;
   }
 
-  private async getConn(name: string): Promise<Conn> {
+  /**
+   * 按 node 名取连接：已有的直接用；正在建的等同一个 Promise。
+   * 不去重的话并发两次调用会建两条，后建的 conns.set 覆盖先建的，先建那条就没人关了。
+   */
+  private getConn(name: string): Promise<Conn> {
     const existing = this.conns.get(name);
-    if (existing) return existing;
+    if (existing) return Promise.resolve(existing);
+    const inflight = this.opening.get(name);
+    if (inflight) return inflight;
     const node = this.nodes.get(name);
-    if (!node) throw new Error(`未知 node: ${name}`);
-    return this.open(node);
+    if (!node) return Promise.reject(new Error(`未知 node: ${name}`));
+    const p = this.open(node).finally(() => {
+      if (this.opening.get(name) === p) this.opening.delete(name);
+    });
+    this.opening.set(name, p);
+    return p;
   }
 
-  private drop(name: string): void {
+  /** 丢掉到某 node 的连接。返回的 Promise 在对方收到 DELETE（或放弃）且本地关完后才结束 */
+  private drop(name: string): Promise<void> {
     const c = this.conns.get(name);
-    if (c) {
-      c.client.close().catch(() => {});
-      c.closeExtra?.().catch(() => {});
-      this.conns.delete(name);
-    }
+    if (!c) return Promise.resolve();
+    this.conns.delete(name);
+    return closeConn(c);
   }
 
   /**
@@ -147,9 +185,10 @@ export class HubClientManager {
     let conn: Conn;
     try {
       conn = await this.getConn(name);
-    } catch {
+    } catch (e) {
+      if (this.closed) throw e;
       // 缓存可能是 stale 的：丢弃后重连一次（仍失败就抛）
-      this.drop(name);
+      void this.drop(name);
       conn = await this.getConn(name);
     }
 
@@ -157,14 +196,19 @@ export class HubClientManager {
       return (await conn.client.callTool({ name: toolName, arguments: args }, undefined, { timeout })) as CallToolResult;
     } catch (callErr) {
       if (!isConnectionError(callErr)) throw callErr;
+      // 会话自己在关：closeAll 把连接 close 掉，在飞的请求以 "Connection closed" 失败进到这里。
+      // 这时候重连会建出一条 closeAll 之后没人回收的连接（vps 节点就是一份新的 SSHManager），直接抛
+      if (this.closed) throw callErr;
       // 连接在请求途中断了：重连重发一次
-      this.drop(name);
+      void this.drop(name);
       const conn2 = await this.getConn(name);
       return (await conn2.client.callTool({ name: toolName, arguments: args }, undefined, { timeout })) as CallToolResult;
     }
   }
 
+  /** 关掉本会话到所有 node 的连接。之后这个 manager 不再建连（在飞的调用失败也不重连） */
   async closeAll(): Promise<void> {
-    for (const name of [...this.conns.keys()]) this.drop(name);
+    this.closed = true;
+    await Promise.allSettled([...this.conns.keys()].map((n) => this.drop(n)));
   }
 }
