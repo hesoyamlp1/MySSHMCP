@@ -1,6 +1,9 @@
+<!-- Keep in sync with README.zh-CN.md -->
+English | [简体中文](./README.zh-CN.md)
+
 # @mori-mori/mcp-ssh-pty
 
-MCP Server for SSH remote command execution. 命令默认走无头 `exec` 通道（一发一收、独立、直接拿 exitCode、输出无需清洗、不会卡死 session）；交互式 REPL / TUI / 需保留 shell 状态的场景用 `mode:"pty"`（持久 PTY shell，首次用到才懒加载）。
+MCP Server for SSH remote command execution. By default, commands run over a headless `exec` channel — one shot in, one result out, each isolated, with the `exitCode` handed straight back, output that needs no cleanup, and no way to wedge the session. For interactive REPLs, TUIs, or anything that has to keep shell state around, switch to `mode:"pty"`: a persistent PTY shell that's created lazily the first time you need it.
 
 ## Installation
 
@@ -11,55 +14,55 @@ npm install -g @mori-mori/mcp-ssh-pty
 ### Start MCP Server
 
 ```bash
-# stdio 模式（默认，被 Claude Code 作为子进程拉起）
+# stdio mode (default, spawned as a child process by Claude Code)
 mcp-ssh-pty
 
-# HTTP 模式（作为独立 daemon 运行，可被远程 Claude Code 连接）
+# HTTP mode (runs as a standalone daemon, can be connected to by a remote Claude Code)
 mcp-ssh-pty --http --port 7777 --host 127.0.0.1
 mcp-ssh-pty --http --port 7777 --host 127.0.0.1 --token <shared-secret>
 ```
 
-HTTP 模式参数也可通过环境变量提供：`MCP_HTTP_PORT` / `MCP_HTTP_HOST` / `MCP_HTTP_TOKEN`。
+HTTP mode arguments can also be supplied via environment variables: `MCP_HTTP_PORT` / `MCP_HTTP_HOST` / `MCP_HTTP_TOKEN`.
 
 ### Add to Claude Code
 
 ```bash
-# stdio（本机）
+# stdio (local)
 claude mcp add --transport stdio ssh -- mcp-ssh-pty
 
-# 或使用 npx（无需安装）
+# or via npx (no install)
 claude mcp add --transport stdio ssh -- npx -y @mori-mori/mcp-ssh-pty
 
-# HTTP（远程或本机 daemon）
+# HTTP (remote or local daemon)
 claude mcp add --transport http ssh-remote http://127.0.0.1:7777/mcp
-# 带 Bearer token：
+# with Bearer token:
 claude mcp add --transport http ssh-remote http://127.0.0.1:7777/mcp \
   --header "Authorization: Bearer <shared-secret>"
 ```
 
-## 架构：多机统一管理（hub 模式）
+## Architecture: unified multi-machine management (hub mode)
 
-典型场景：Claude Code 只跑在 VPS 上，要同时管理 VPS 自己 + 多台 mac（及各自内网机），而且只想注册**一个** MCP。
+The typical setup: Claude Code runs only on a VPS, but you want to manage the VPS itself plus several Macs (and each of their LAN machines) at once — while registering just **one** MCP.
 
-方案：**hub 模式**。同一个二进制有两种角色：
+The answer is **hub mode**. The same binary plays two roles:
 
-- **直连模式**（默认 / `--http`）：直接做 SSH 命令执行的活（默认 exec 通道，可选 PTY）。每台 mac 上各跑一个 `--http` daemon，经反向隧道暴露到 VPS。
-- **hub 模式**（`--hub`）：跑在 VPS，对 Claude 只露一个 `ssh`/`sftp`，内部按 `node` 路由到各 mac 的 daemon（自己既是 MCP server 又是各 daemon 的 client）。VPS 自己作为一个 in-process node 直接进 hub，不用额外起 daemon。
+- **Direct mode** (default / `--http`): does the real SSH work (the exec channel by default, PTY when you ask for it). Each Mac runs its own `--http` daemon and exposes it to the VPS over a reverse tunnel.
+- **Hub mode** (`--hub`): runs on the VPS and shows Claude a single `ssh`/`sftp`, then routes internally by `node` to each Mac's daemon — so it's an MCP server and a client of every daemon at the same time. The VPS itself joins the hub as an in-process node, so it needs no daemon of its own.
 
 ```
 Claude Code (VPS)
-  └─ 一条注册：ssh-hub (stdio) → mcp-ssh-pty --hub  → 读 ~/.mori/ssh/hub.json
-       ├─ in-process 直连           → vps          （VPS 本机 shell）
-       ├─ http://127.0.0.1:27778/mcp → macbook-air  （公司·主力）  ┐ 各 mac daemon 本地都听 27777，
-       ├─ http://127.0.0.1:27779/mcp → mac-mini-1   （公司·备用）  ┤ 反向隧道错开暴露到 VPS 不同端口
-       └─ http://127.0.0.1:27780/mcp → mac-mini-2   （家里）       ┘ （27777 保留留空，hub 端口从 27778 起）
-     ssh({action:"list"}) → 逐 node 探活 online；connect node=macbook-air → 路由到该 daemon
+  └─ one registration: ssh-hub (stdio) → mcp-ssh-pty --hub  → reads ~/.mori/ssh/hub.json
+       ├─ in-process direct           → vps          (VPS local shell)
+       ├─ http://127.0.0.1:27778/mcp → macbook-air  (office · primary)  ┐ each Mac daemon listens on 27777 locally,
+       ├─ http://127.0.0.1:27779/mcp → mac-mini-1   (office · backup)   ┤ reverse tunnels stagger to different VPS ports
+       └─ http://127.0.0.1:27780/mcp → mac-mini-2   (home)              ┘ (27777 reserved/empty, hub ports start at 27778)
+     ssh({action:"list"}) → probes each node's online status; connect node=macbook-air → routes to that daemon
 ```
 
-- 一条注册管全部；每台 mac 仍是自己的 daemon 在干活 → 保留**一跳 sftp**、本地直连、各自 notes/shortcuts。
-- 每个 node 是独立下游连接 → 多台 mac 的连接（exec 通道 / PTY）可**同时活着**，hub 只负责路由。
+- One registration covers everything, yet each Mac's own daemon still does the work — so you keep **one-hop sftp**, local direct connections, and per-machine notes/shortcuts.
+- Each node is an independent downstream connection, so connections (exec channel or PTY) to several Macs can be **alive at the same time**; the hub only routes between them.
 
-hub 配置 `~/.mori/ssh/hub.json`（见 `hub.example.json`）：
+Hub config `~/.mori/ssh/hub.json` (see `hub.example.json`):
 
 ```json
 { "nodes": [
@@ -70,38 +73,37 @@ hub 配置 `~/.mori/ssh/hub.json`（见 `hub.example.json`）：
 ] }
 ```
 
-注册 + 用法：
+Registration + usage:
 
 ```bash
 claude mcp add ssh-hub -- mcp-ssh-pty --hub
-# ssh({action:"list"})                              # 所有 node + online + 各 node 的 server
-# ssh({node:"macbook-air", action:"connect", server:"local"})   # 连 macbook-air 本机
-# ssh({command:"..."})                              # 在当前 node 当前连接上执行
+# ssh({action:"list"})                              # all nodes + online status + each node's servers
+# ssh({node:"macbook-air", action:"connect", server:"local"})   # connect to macbook-air's local shell
+# ssh({command:"..."})                              # run on the current node's current connection
 ```
 
-> 完整部署、端口纪律（每台 mac daemon 反向隧道**错开**到不同 VPS 端口）、单台 mac daemon 的部署、排错见 `skills/deploy-ssh-mcp/SKILL.md`。
-> `ssh-mac` 那种「每台 mac 一条 HTTP 注册」仍可用作单机直连，但多机统一管理推荐 hub。
+> For full deployment, port discipline (each Mac daemon's reverse tunnel must **stagger** onto a different VPS port), deploying a single Mac's daemon, and troubleshooting, see `skills/deploy-ssh-mcp/SKILL.md`.
+> The `ssh-mac` approach — one HTTP registration per Mac — still works for a single-machine direct connection, but for managing several machines together, prefer the hub.
 
-### hub 常驻守护进程（`--hub --http`，v2.7.0 起）
+### hub resident daemon (`--hub --http`, since v2.7.0)
 
-默认的 `--hub` 是 stdio：**每个** Claude Code 会话起一个 hub 进程（每个约 100M）。VPS 上同时开五六个会话时，
-光 hub 就是 500M。加 `--http` 就变成**一个常驻守护进程服务所有会话**，每个 MCP 会话各自一份「当前 node + 到各 mac 的下游连接」，互不串台：
+The default `--hub` is stdio, which means **every** Claude Code session spawns its own hub process (~100M each). Open five or six sessions on the VPS and the hubs alone eat 500M. Adding `--http` collapses that into **a single resident daemon that serves every session** — each MCP session still gets its own "current node + downstream connections to each Mac", and they never cross-talk:
 
 ```bash
-# 守护进程（VPS 上，只绑回环）
+# daemon (on the VPS, bound to loopback only)
 mcp-ssh-pty --hub --http --port 27790 --host 127.0.0.1 --token <secret>
-#   --idle-min N   空闲会话回收阈值（分钟），hub 默认 1440（24h），0 = 不回收；直连 daemon 默认 30
-# 注册（HTTP，替代 stdio 那条）
+#   --idle-min N   idle session reclaim threshold (minutes); hub default 1440 (24h), 0 = never reclaim; direct daemon default 30
+# registration (HTTP, replaces the stdio one)
 claude mcp add --transport http ssh-hub http://127.0.0.1:27790/mcp --header "Authorization: Bearer <secret>"
-# 看它活着没
+# check it's alive
 curl -s http://127.0.0.1:27790/health   # {"ok":true,"name":"ssh-hub","activeSessions":N,...}
 ```
 
-要点：
-- **重启守护进程会让所有已连着的会话失去 MCP 会话**（回 404 `session_not_found`），得在各会话里 `/mcp` 重连；升级前先想好。stdio 的 `--hub` 仍然可用，谁不想受这个影响谁继续用 stdio。
-- 空闲回收阈值 hub 侧放得很宽（24h）：Claude 会话经常空半小时以上，回收了它下次 `ssh` 就得重新 initialize；hub 会话本身很小，下游 mac daemon 有自己的 30 分钟回收，hub 下次调用会自动重连。
-- 实测（VPS 本机）：经 HTTP hub 一条 `true` 约 25ms；到 mac 的远程命令约 180ms/次、首次 connect 1.1～1.4s（隧道往返为主）。
-- **配置生效**：`hub.json`（node 列表 / note）守护进程启动时读一次、缓存整个进程生命周期，改了要 `systemctl restart ssh-hub`（连着的会话得 /mcp 重连）；vps 节点的 `ssh-servers.json` 每个 MCP 会话各自读，新会话即时生效、老会话重连即可。
+Key points:
+- **Restarting the daemon drops the MCP session for every connected client** (they get a 404 `session_not_found`), so each one has to `/mcp` to reconnect — think this through before upgrading. The stdio `--hub` still works, so anyone who'd rather avoid this can stay on stdio.
+- The idle-reclaim threshold is deliberately loose on the hub side (24h): Claude sessions often sit idle for well over half an hour, and reclaiming one forces the next `ssh` to re-initialize. Hub sessions are tiny anyway, the downstream Mac daemons do their own 30-minute reclaim, and the hub just reconnects on its next call.
+- Measured on the VPS itself: a single `true` through the HTTP hub runs ~25ms; remote commands to a Mac ~180ms each, with the first connect taking 1.1–1.4s (mostly tunnel round-trips).
+- **Config reload**: `hub.json` (the node list / notes) is read once when the daemon starts and cached for the life of the process, so after editing it you need `systemctl restart ssh-hub` (and connected sessions must `/mcp` reconnect). The vps node's `ssh-servers.json`, by contrast, is read per MCP session — new sessions pick up changes right away, existing ones just need a reconnect.
 
 ## CLI Commands
 
@@ -198,40 +200,33 @@ ssh({ action: "connect", server: "my-server" })  # Remote SSH
 
 ### Command Execution
 
-默认走 **exec 通道**：一发一收、独立、不会被 heredoc / 续行符卡死 session。
+Goes through the **exec channel** by default: one-shot, isolated, won't get wedged by heredocs / line continuations.
 
-**返回形状贴近原生 Bash（v2.8.0 起）**：成功就直接回原始 stdout（真换行、无 JSON 外壳）；
-有 stderr 接在后面；只有异常时末尾加一行标注——`[exit 3]` / `[超时]` / `[signal …]` / `[输出已截断]`（并置 isError）。
-无输出的成功回 `(exit 0，无输出)`。这样模型读着跟原生 Bash 一致、也省 token。
+**Return shape stays close to native Bash (since v2.8.0)**: on success you get raw stdout back directly (real newlines, no JSON wrapper), with stderr appended if there is any; only when something goes wrong does it tack a line on the end — `[exit 3]` / `[timeout]` / `[signal …]` / `[output truncated]` (and sets isError). A success with no output comes back as `(exit 0, no output)`. To the model this reads just like native Bash, and it saves tokens.
 
 ```
-ssh({ command: "ls -la" })                            # 直接回目录列表（真换行）
-ssh({ command: "make test", timeout: 120 })           # 失败时末尾 [exit N] + isError
-ssh({ command: "python3 -", stdin: "print(1+1)" })    # 多行内容喂 stdin（exec 通道）
-ssh({ command: "npm test", cwd: "/repo" })            # 在指定目录跑（省掉 cd x &&；cwd 不跨调用持久）
+ssh({ command: "ls -la" })                            # returns the directory listing directly (real newlines)
+ssh({ command: "make test", timeout: 120 })           # on failure, trailing [exit N] + isError
+ssh({ command: "python3 -", stdin: "print(1+1)" })    # feed multi-line content to stdin (exec channel)
+ssh({ command: "npm test", cwd: "/repo" })            # run in a given directory (skips cd x &&; cwd is not persistent across calls)
 ```
 
-**一次性寻址（v2.8.0 起）**：带 `server`（hub 下再带 `node`）跟 `command` 一起，就不用先单独 connect——
-没连就自动连、连着同一台则跳过不重连，一次调用打到目标机；`ssh({command})` 仍沿用当前粘住的连接。
+**One-shot addressing (since v2.8.0)**: pass `server` (and `node` under hub) alongside `command` and you can skip the separate connect — if nothing's connected it connects for you, if you're already on that machine it reuses the connection, and the one call lands on the target. A bare `ssh({command})` still runs on whatever connection is currently stuck to.
 
 ```
-ssh({ command: "uname -a", server: "local" })                    # 直连 daemon 场景：一步到位
-ssh({ node: "mac-mini-2", server: "local", command: "sw_vers" }) # hub 场景：一次调用连 mac 并执行
+ssh({ command: "uname -a", server: "local" })                    # direct daemon: one step
+ssh({ node: "mac-mini-2", server: "local", command: "sw_vers" }) # hub: connect to the Mac and execute in one call
 ```
 
-> exec 通道用的 PATH：daemon 启动时抓一次登录 shell 的 `$PATH`（就是终端里看到的那个）并与自身 PATH 取并集，
-> 所以 mac 上不必再手动 `export PATH` 就能跑 `sysctl` / `brew` 等；只付一次、不进每条命令。
+> The PATH the exec channel uses: at startup the daemon grabs the login shell's `$PATH` once (the same one you see in your terminal) and unions it with its own, so on a Mac you can run `sysctl` / `brew` and friends without manually `export`-ing anything. That cost is paid once, not on every command.
 
-**connect 的 notes 按需加载（v2.8.0 起）**：`connect` 不再把整段 notes 砸进上下文，只回一行"已连接 + 有几条说明"；
-真要看那台机器的 notes / 使用提示时用 `ssh({action:"notes"})` 拉全文（像 skill 一样按需加载，省每次重连的上下文）。
-shortcuts 仍随 connect 给出（简版），完整用 `ssh({action:"shortcuts"})`。
+**connect loads notes on demand (since v2.8.0)**: `connect` no longer dumps the whole notes blob into context — it just returns a one-liner ("connected + N notes"). When you actually want a machine's notes / usage tips, pull the full text with `ssh({action:"notes"})` (loaded on demand like a skill, so you don't pay for it on every reconnect). Shortcuts still come back with connect in short form; for the full list use `ssh({action:"shortcuts"})`.
 
-`sftp({action:"read"})` 同样贴近原生 `Read`：带 `cat -n` 行号返回文件内容，不再包 JSON。
-（`connect` / `list` / `status` 这类控制响应仍是结构化 JSON——它们是状态数据，不是命令/文件内容。）
+`sftp({action:"read"})` follows the same idea as the native `Read`: it returns file contents with `cat -n` line numbers instead of a JSON wrapper. (Control responses like `connect` / `list` / `status` stay structured JSON — they're state data, not command or file content.)
 
-### Interactive / 持久 shell（`mode:"pty"`）
+### Interactive / persistent shell (`mode:"pty"`)
 
-交互式 REPL、TUI（vim/top/less）、`tail -f` + Ctrl-C、需要跨命令保留 cwd/env 时用 `mode:"pty"`（PTY 首次用到才懒加载；`interactive` / `signal` / `read` 都隐含 pty）。
+Reach for `mode:"pty"` when you're in an interactive REPL, a TUI (vim/top/less), running `tail -f` and needing Ctrl-C, or holding cwd/env across commands (the PTY is created lazily on first use, and `interactive` / `signal` / `read` all imply pty).
 
 ```
 ssh({ command: "mysql -u root -p", mode: "pty" })
@@ -239,7 +234,7 @@ ssh({ command: "password123", mode: "pty", interactive: true })
 ssh({ command: "SHOW DATABASES;", mode: "pty", interactive: true })
 ```
 
-> ⚠️ 仅 pty 模式有 heredoc/续行符卡死风险：`mode:"pty"` 下别内联 heredoc 或留未闭合引号；多行内容用 `sftp.write` 或默认 exec 的 `stdin`。
+> ⚠️ Only pty mode risks getting wedged by a heredoc or line continuation: under `mode:"pty"`, don't inline heredocs or leave a quote unclosed. For multi-line content, use `sftp.write` or the default exec channel's `stdin` instead.
 
 ### Read Buffer
 
@@ -249,7 +244,7 @@ ssh({ read: true, lines: -1 })     # All
 ssh({ read: true, lines: 100 })    # 100 lines
 ```
 
-### Signal Control（`mode:"pty"`）
+### Signal Control (`mode:"pty"`)
 
 ```
 ssh({ command: "tail -f /var/log/syslog", mode: "pty" })
