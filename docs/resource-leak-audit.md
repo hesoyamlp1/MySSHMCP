@@ -35,7 +35,7 @@ hub 模式里 vps 节点是 in-process 直连 server（一份 SSHManager），�
 | initialize 没成功的会话 | 任何 | 漏 | 每个 initialize 请求都先 `makeServer()`；browser-hub 的 BrowserClientManager 构造时就起了 setInterval，`onsessioninitialized` 没触发它就不进 `sessions`，永远没人 `close()`。现在 `handleRequest` 之后没拿到 sessionId 就调 `close()` |
 | `sessions` Map、sweepTimer、withTimeout 的定时器 | 全部 | 不漏 | `sessions.delete` 在 onclose；定时器都 unref + clear |
 | `hubList` 对每个在线 node 各开一条下游连接 | — | 漏（未修） | `ssh({action:"list"})` 的子列表经 `mgr.callTool(node, "ssh", {action:"list"})`，一次 list 在每台 mac 上各留一个会话，直到本会话结束（现在结束时会发 DELETE，所以有界） |
-| hub 24 小时的 idle 阈值 | C | 漏（未修） | 非优雅断开的 Claude 会话要 24 小时后才开始回收链。当初定 24 小时是因为回收后 Claude 下次调用拿 404 要重新 initialize，Claude Code 会不会自动重新 initialize 没验证过 |
+| hub 的 idle 阈值 | C | 漏（已改） | 原来 24 小时，非优雅断开的 Claude 会话要 24 小时后才开始回收链。验过 Claude Code 拿 404 会自动重新 initialize 后，2026-08-23 改成 30 分钟（8a8c52e，决定 d3），2.9.6 已在全集群生效 |
 
 ### SSH 连接层（ssh-manager.ts / shell-manager.ts / sftp-manager.ts / exec-runner.ts）
 
@@ -71,6 +71,22 @@ hub 模式里 vps 节点是 in-process 直连 server（一份 SSHManager），�
 | 工具清单缓存、快照/截图结果、按 node 名存的 Map | 任何 | 不漏 | 随会话闭包释放；结果不存；Map 大小 ≤ 机器数 |
 | 转发中挂着的请求 | 上游不回 | 不漏 | connect 8s、callTool 120s 或 time+60s、listTools 15s、terminate 3s 都有上限 |
 | `browser_wait_for` 超过 30 分钟 | 上游 idle 判死 | 漏（未修） | `lastUse` 只在调用开始时刷，等待中途被 `sweepIdle` drop（不漏资源，但调用会报"没执行"） |
+
+## 2.9.6 rollout 与升级后的残留检查（2026-08-23）
+
+npm 2.9.6 发布后按 skill deploy-ssh-mcp 的顺序升级：三台 mac `npm i -g`（公司两台走 npmmirror）+ `launchctl kickstart -k`，
+windows `npm i -g` + WMI 脱离会话跑 `~/.mori/hub-restart.ps1`（杀 27777 的监听进程再跑 hub-up.ps1），
+最后 VPS `npm i -g` + `systemctl restart ssh-hub browser-hub`，`claude --version` 仍正常。
+`ssh({action:"list"})` 现在直接报每个 node 的版本和会话数，五个 node 全部 2.9.6。
+
+升级后逐台看过残留，结论：
+- 三台 mac 的 daemon 攥着的都是回环的会话连接（air 12 / mini-1 4 / mini-2 2），升级前也没有异常堆积；
+  隧道以外没有游离的 ssh 客户端进程。mini-1 / air 上的几十个 chromium 进程是用户自己的 Chrome（随登录起的）
+  加 playwright daemon 的那一个实例，不是泄漏。
+- windows daemon 会话数 20 是升级过程中失败调用堆的，重启即清。
+- 野草云、搬瓦工：sshd 会话进程各 0 / 12（搬瓦工那 12 个是 windows 隧道 + v2ray + 野草云的正常连接）。
+- VPS：升级时还有两个别的会话私有的 stdio 形态 `mcp-ssh-pty` 进程锁在 2.9.5，要等那两个会话自己重开；
+  hub 进程对外只有到各 mac 隧道的回环连接，到搬瓦工 0 条。
 
 ## 这次改了什么（都在 2.9.6 里）
 
