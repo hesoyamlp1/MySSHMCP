@@ -1,0 +1,23 @@
+package.json
+  s_09dfaeea6b1206::t_94155bb712aa58 3,49
+src/browser-client.ts
+  s_09dfaeea6b1206::t_71514d68bc9dc7 169-170,201
+src/browser-hub.ts
+  s_09dfaeea6b1206::t_6525770222c893 37-43,118-121,194,204-207,440-445
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "49b0ab03d7deaea3eaec11c14b7de90807ee6a11",
+  "prompts": {},
+  "sessions": {
+    "s_09dfaeea6b1206": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5bdee28e-f817-40a7-9588-c339eab0f54d",
+        "model": "claude-fable-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
