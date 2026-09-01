@@ -166,6 +166,8 @@ export class BrowserClientManager {
   /** 每台机器上最后一次导航到的 URL：上游会话被判死后，重连时靠它回到原来那一页 */
   private lastUrl: Map<string, string> = new Map();
   private idleTimer?: NodeJS.Timeout;
+  /** idle 回收断开上游连接时的通知(browser-hub 用它释放 concurrency 占位) */
+  onIdleDrop?: (name: string) => void;
   /** 正在建的上游连接，按机器名去重：并发两次 getConn 只建一条 */
   private opening: Map<string, Promise<Conn>> = new Map();
   /** closeAll 之后置位：不再建连、不再自愈重连 */
@@ -196,6 +198,7 @@ export class BrowserClientManager {
         );
         void this.drop(name);
         this.idleDropped.add(name);
+        this.onIdleDrop?.(name);
       }
     }
   }

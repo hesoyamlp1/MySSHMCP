@@ -34,6 +34,13 @@ function markActive(node: string, owner: object): void {
   s.add(owner);
 }
 
+function unmark(node: string, owner: object): void {
+  const s = ACTIVE_BY_NODE.get(node);
+  if (!s) return;
+  s.delete(owner);
+  if (s.size === 0) ACTIVE_BY_NODE.delete(node);
+}
+
 function unmarkAll(owner: object): void {
   for (const [node, s] of ACTIVE_BY_NODE) {
     s.delete(owner);
@@ -108,6 +115,10 @@ export function buildBrowserHubServer(
   /** 本会话的身份标识，用于 concurrency 记账 */
   const owner = {};
 
+  // idle 回收断开连接 = 那边窗口已关、内存已还,concurrency 占位跟着释放;
+  // 下次真要用时(CallTool 前的 !isConnected 分支)重新占位
+  mgr.onIdleDrop = (name) => unmark(name, owner);
+
   const state: {
     currentNode?: string;
     announced: Set<string>;
@@ -180,7 +191,7 @@ export function buildBrowserHubServer(
     const limit = node?.browser.concurrency;
     if (!limit) return;
     // 本会话已经占着位子就不再算一次
-    if (mgr.isConnected(name)) return;
+    if (ACTIVE_BY_NODE.get(name)?.has(owner)) return;
     if (activeCount(name) >= limit) {
       const others = mgr
         .listNodes()
@@ -190,7 +201,10 @@ export function buildBrowserHubServer(
         `${name} 上已经有 ${activeCount(name)} 个会话在用浏览器（上限 ${limit}）。\n` +
           (others.length > 0
             ? `换一台：${others.join(" / ")}（browser_node({action:"connect", node:"..."})）`
-            : `其它机器也满了或没铺，等一会儿，或者去某台跑 browser_node({action:"down"}) 释放。`)
+            : `其它机器也满了或没铺。空闲的占位` +
+              (UPSTREAM_IDLE_MS > 0 ? `${Math.round(UPSTREAM_IDLE_MS / 60000)} 分钟` : ``) +
+              `会自动释放,稍等重试;都在实际使用就把情况告诉用户(hub.json 的 concurrency 可调)。` +
+              `别 browser_node({action:"down"})——那会关掉其他会话的窗口。`)
       );
     }
   }
@@ -421,6 +435,12 @@ export function buildBrowserHubServer(
       // 自动路由选中的机器也要走完整的准备流程（拉起 daemon + 记账 + 设为当前）
       if (state.currentNode !== node) {
         await useNode(node);
+      }
+
+      // idle 回收释放过占位的会话,重建连接前先重新占位(满了明确报错,不悄悄超卖)
+      if (!mgr.isConnected(node)) {
+        checkConcurrency(node);
+        markActive(node, owner);
       }
 
       const idleDropped = mgr.takeIdleDroppedNote(node);
