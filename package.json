@@ -27,7 +27,8 @@
   "license": "MIT",
   "files": [
     "dist",
-    "ssh-servers.example.json"
+    "ssh-servers.example.json",
+    "README.zh-CN.md"
   ],
   "dependencies": {
     "@inquirer/prompts": "^8.1.0",
