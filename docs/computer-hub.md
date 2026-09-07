@@ -1,7 +1,6 @@
 # computer-hub 设计：远程桌面操作统一寻址
 
-状态：**已实现，四台机器铺完、三台跑通**（mac-mini-2 + windows-4070ti + macbook-air），2026-09-06。
-mac-mini-1 的服务和隧道都好了，差用户在那台机器上勾两个系统权限（见第十节）。
+状态：**已实现，四台机器全部跑通**（mac-mini-2 / mac-mini-1 / macbook-air / windows-4070ti），2026-09-06。
 代码在 `src/computer-*.ts`，服务是 VPS 上的 systemd `computer-hub.service`（127.0.0.1:27793）。
 
 一句话：把「桌面操作跑在哪台机器」从每次手工 ssh 变成一次寻址，做法跟 browser-hub 同构，
@@ -249,21 +248,37 @@ air 的更新器自己检查过、认为它的 5551 已是最新，多半是灰�
 为兼容旧版加的三处（驱动路径探测、`runtimeStatus` 可能缺失、启动超时分两档）保留着，
 以后哪台机器的应用再漂移不用改代码。
 
-### 建连慢的真正原因：codex_apps
+### 建连慢的真正原因：codex_apps，用 `--disable apps` 关掉
 
-air 升级后单次调用已经 1 秒，但建连仍要 20 多秒，mini-2 只要 2 秒。分段计时发现卡在
-`mcpServerStatus/list`：它要等**所有** server 起完，其中有个内置的 `codex_apps`
-（连接器运行时，94 个工具，要联网拉账号里的 app 清单），公司那台 24 秒、家里那台 2 秒。
+air 升级后单次调用已经 1 秒，建连却要 20 多秒，而两台 mini 只要 2 秒。分段计时定位到
+`mcpServerStatus/list`：它要等**所有** server 起完，其中一个是内置的 `codex_apps`
+（连接器运行时，94 个工具：`sites.*` / `google_drive.*` / `safety_settings.*`，
+要联网拉账号里的 app 清单）。air 上 24 秒，两台 mini 上**根本没有这个 server**——
+它只在账号配了连接器的机器上出现。
 
-`codex_apps` 关不掉——传 `enabled: false` 会让 `thread/start` 直接报
-`invalid transport in mcp_servers.codex_apps`。所以改成**不等它**：拉清单只给 8 秒，
-超时就先按静态清单开工，后台等真清单回来再替换。air 的建连因此 25 秒降到 10 秒。
+关掉它的正确方式是启动参数 `--disable apps`（`codex features list` 里那个 stable 的 `apps`）。
+四台机器的启动脚本都加了。**不能**用 `mcp_servers.codex_apps = {enabled:false}`——
+那样 `thread/start` 直接报 `invalid transport in mcp_servers.codex_apps`。
 
-### mac-mini-1 差的那一步：两个系统权限
+实测（air）：拉清单 24.0s → 1.4s，建连 25s → 2.8s。
 
-服务、隧道、配置都铺好了，`computer_list_apps` 秒回，但 `computer_get_app_state` 会挂住——
+hub 里那层「拉清单只等 8 秒、超时先按静态清单开工、后台补齐」保留着：
+以后哪台机器又冒出个慢 server，不至于把建连卡死。
+
+### 新机器第一次要给两个系统权限
+
+mac-mini-1 铺完之后 `computer_list_apps` 秒回，但 `computer_get_app_state` 一直挂着——
 读界面要辅助功能、截图要屏幕录制，新装的应用第一次用时 macOS 弹一个要人点的框，
-**没点之前调用不报错，就是一直等**。
+**没点之前调用不报错，就是一直等**。用户在那台机器上勾了辅助功能和屏幕录制之后即正常。
 
-要用户在 mac-mini-1 上做一次：系统设置 → 隐私与安全性 → 辅助功能 / 屏幕录制，把 ChatGPT 勾上。
-hub 现在会在这种超时上附一句针对性提示，不用再猜。
+判据就是这个对比：列 app 秒回、读状态卡住 = 权限没给。
+hub 会在这种超时上附一句针对性提示，不用再猜。
+
+### 四台机器实测（2026-09-06，全部 `--disable apps` 之后）
+
+| | 建连 | 首次读状态 | 稳态读状态 |
+|---|---|---|---|
+| mac-mini-2 | 2.4s | 0.6s | 0.3s |
+| macbook-air | 2.8s | 1.3s | 1.0s |
+| mac-mini-1 | 2.5s | 1.0s | 0.6s |
+| windows-4070ti | 3.2s | 约 3s | 约 3s |
