@@ -121,11 +121,7 @@ function upName(out: string): string {
   return out.startsWith(PREFIX) ? out.slice(PREFIX.length) : out;
 }
 
-/**
- * 没选机器时对外报的工具清单：只有 computer_node。
- * 为什么不像 browser-hub 那样先报一份完整清单：两个平台的工具面不同（mac 11 个、windows 1 个），
- * 报一份"通用清单"会让模型在 windows 上调到不存在的工具。选完机器后清单会跟着变。
- */
+/** 每次调用都要有的那个：选机器 */
 function baseTools(): Tool[] {
   return [NODE_TOOL];
 }
@@ -202,10 +198,18 @@ export function buildComputerHubServer(
     return note;
   }
 
-  /** 当前机器该对外报哪些工具 */
+  /**
+   * 当前机器该对外报哪些工具。
+   *
+   * 还没选机器时报**全集**（各平台工具面的并集）。早先这里只报 computer_node，
+   * 理由是"两个平台工具面不同，报通用清单会让模型在 windows 上调到不存在的工具"——
+   * 但代价是客户端的 /mcp 里只看得见 1 个工具，像是坏了，也让人不知道这个 hub 能干什么。
+   * 选完机器后照旧收窄成那台机器的实际清单（并发 listChanged 通知），所以真正动手时
+   * 看到的仍然是准的；没选机器时调具体工具本来就会被"还没选机器"挡住。
+   */
   async function toolsForCurrent(): Promise<Tool[]> {
     const name = state.currentNode ?? soleNode();
-    if (!name) return baseTools();
+    if (!name) return [...baseTools(), ...unionTools()];
     const n = mgr.getNode(name);
     if (!n) return baseTools();
     if (!mgr.isConnected(name)) {
@@ -227,6 +231,23 @@ export function buildComputerHubServer(
     } catch {
       return [...baseTools(), ...staticTools(n)];
     }
+  }
+
+  /**
+   * 各机器工具面的并集，用于"还没选机器"时的展示。
+   * 现在实际就是 mac 那套（11 个）——windows 的 computer_js 也在里面。
+   */
+  function unionTools(): Tool[] {
+    const seen = new Set<string>();
+    const out: Tool[] = [];
+    for (const n of mgr.listNodes()) {
+      for (const t of staticTools(n)) {
+        if (seen.has(t.name)) continue;
+        seen.add(t.name);
+        out.push(t);
+      }
+    }
+    return out;
   }
 
   /** 上游连不上时给的静态清单：只求名字对，描述简略 */
