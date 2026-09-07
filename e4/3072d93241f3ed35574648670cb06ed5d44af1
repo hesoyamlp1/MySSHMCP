@@ -1,0 +1,19 @@
+src/computer-hub.ts
+  s_dd47599cad225d::t_e21446f2d15bc4 124,201-209,212,236-252
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "e43072d93241f3ed35574648670cb06ed5d44af1",
+  "prompts": {},
+  "sessions": {
+    "s_dd47599cad225d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f2b381f6-0560-4f4b-9afb-0692e61e5def",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
