@@ -1,0 +1,29 @@
+src/computer-client.ts
+  s_dd47599cad225d::t_5390d8bbe7be4d 1-650
+src/index.ts
+  s_e59b6b3c26be01::t_83c4e26ac857df 20-22,484-554,566-570
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "5da40d06e412e09be7af962981b660dbc1edcfe1",
+  "prompts": {},
+  "sessions": {
+    "s_dd47599cad225d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f2b381f6-0560-4f4b-9afb-0692e61e5def",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    },
+    "s_e59b6b3c26be01": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06fc6-095c-7ae3-998d-573b440ede2c",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
