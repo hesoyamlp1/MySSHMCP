@@ -137,7 +137,10 @@ export function buildComputerHubServer(
 ): { server: Server; close: () => Promise<void> } {
   const server = new Server(
     { name: "computer-hub", version },
-    { capabilities: { tools: {} } }
+    // listChanged 必须声明：工具清单是按当前选中的机器算的（mac 11 个 / windows 1 个），
+    // connect 之后清单会变。不发 notifications/tools/list_changed 的话，客户端一直用
+    // 初次拉到的那份——也就是只有 computer_node，接上了机器却没有工具可用。
+    { capabilities: { tools: { listChanged: true } } }
   );
 
   /** 本会话的身份标识，用于独占记账 */
@@ -194,6 +197,8 @@ export function buildComputerHubServer(
     }
     await mgr.toolsOf(name); // 触发握手 + thread/start，失败在这里就报出来
     state.currentNode = name;
+    // 清单变了（从"只有 computer_node"变成这台机器的实际工具面），告诉客户端重新拉
+    void server.sendToolListChanged().catch(() => {});
     return note;
   }
 
@@ -332,6 +337,7 @@ export function buildComputerHubServer(
       await mgr.close(target);
       release(target, owner);
       if (state.currentNode === target) state.currentNode = undefined;
+      void server.sendToolListChanged().catch(() => {});
       return textResult({ 已释放: target, 说明: "上游 thread 已收掉，别的会话可以用这台机器了" });
     }
 
