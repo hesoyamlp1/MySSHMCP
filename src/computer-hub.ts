@@ -216,7 +216,9 @@ export function buildComputerHubServer(
           out.push({ ...t, name: outName(tname) });
         }
       }
-      return out;
+      // 上游清单还没回来（那台机器的 codex_apps 起得慢，见 client 里的说明）：
+      // 先给静态清单，名字是对的，模型照样能干活；真清单回来后这里自然就换成它。
+      return out.length > baseTools().length ? out : [...baseTools(), ...staticTools(n)];
     } catch {
       return [...baseTools(), ...staticTools(n)];
     }

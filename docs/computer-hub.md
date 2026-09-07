@@ -1,7 +1,7 @@
 # computer-hub 设计：远程桌面操作统一寻址
 
-状态：**已实现，三台机器落地跑通**（mac-mini-2 + windows-4070ti + macbook-air），2026-09-06。
-mac-mini-1 还差一步：它的 ChatGPT.app 要登录一次才会更新到带 codex 的版本（见第十节）。
+状态：**已实现，四台机器铺完、三台跑通**（mac-mini-2 + windows-4070ti + macbook-air），2026-09-06。
+mac-mini-1 的服务和隧道都好了，差用户在那台机器上勾两个系统权限（见第十节）。
 代码在 `src/computer-*.ts`，服务是 VPS 上的 systemd `computer-hub.service`（127.0.0.1:27793）。
 
 一句话：把「桌面操作跑在哪台机器」从每次手工 ssh 变成一次寻址，做法跟 browser-hub 同构，
@@ -49,7 +49,7 @@ Claude Code (VPS)
        ├─ mac-mini-2      → ws://127.0.0.1:27786 ─┐ 反向隧道，每台一个独立端口
        ├─ windows-4070ti  → ws://127.0.0.1:27787  │
        ├─ macbook-air     → ws://127.0.0.1:27788  │
-       └─（mac-mini-1     → 27789，待它的应用能用）┘
+       └─ mac-mini-1      → ws://127.0.0.1:27789 ─┘
 
 拉起远端 app-server 时：computer-hub ──借 ssh-hub──→ 那台机器上执行 up 命令
 ```
@@ -219,35 +219,51 @@ VPS 只跑这个转发进程。桌面操作全部发生在远程机器上，屏�
 
 ---
 
-## 十、三台 mac 的版本差异（这一节是踩出来的）
+## 十、四台机器的现状与两个版本坑
 
-三台机器上 ChatGPT.app 的版本不一样，布局和行为都跟着变。hub 在建连前会探一次，
-不用手工配，但知道差在哪有助于排查。
+### 版本：三台 mac 现在都是 26.901
+
+原来三台各不相同，踩出一串问题，2026-09-06 全部拉齐：
 
 | | mac-mini-2 | macbook-air | mac-mini-1 |
 |---|---|---|---|
-| ChatGPT.app | 26.901 | 26.715 | 1.2026.183（旧分发包，**没有** codex 和插件） |
-| codex | 0.153.4 | 0.145.0-alpha.18 | 无 |
-| 驱动路径 | `computer-use/bin/computer-use-client-launcher` | `computer-use/Codex Computer Use.app/…/SkyComputerUseClient` | 无 |
-| unified 插件 | 有（所以有 `computer_js`） | 没有（只有 10 个离散工具） | 无 |
-| `mcpServerStatus/list` | 返回 `runtimeStatus` | **不返回**这个字段 | — |
-| 建连 / 首次调用 | 2s / 0.4s | 31s / 19s | — |
+| 之前 | 26.901 | 26.715（7 月） | 没装 |
+| 现在 | 26.901.51231 | 26.901.51231 | 26.901.51231 |
 
-由此在代码里加了三处兼容：
+**升级包从哪来**：应用自己的 Sparkle 更新源是
+`https://persistent.oaistatic.com/codex-app-prod/appcast.xml`（从
+`~/Library/Caches/com.openai.codex/Cache.db` 里挖出来的，Info.plist 和二进制里都没写）。
+里面直接给各版本的 zip 直链，如 `ChatGPT-darwin-arm64-26.901.51231.zip`（567MB）。
+air 的更新器自己检查过、认为它的 5551 已是最新，多半是灰度没轮到，所以直接装。
+官网 `persistent.oaistatic.com/sidekick/public/ChatGPT.dmg` 是**另一条线**的旧包
+（1.2026.183，162MB），里面根本没有 codex 和插件目录，别用它。
 
-1. **驱动路径探测**：建连前经 ssh-hub 在那台机器上看哪个可执行文件存在，按实际的拼 thread 配置。
-2. **`runtimeStatus` 可能不存在**：老版本判"活没活"只能看它报没报出工具。
-3. **启动超时分两档**：建连 + initialize 10 秒，`thread/start` 和拉工具清单 45 秒
-   （air 上实测要十几秒）。
+**旧版慢一个数量级**（air 同一台机器，升级前后）：
 
-还有一条不在代码里、在机器上：**老架构的 computer-use 客户端要连 ChatGPT.app 托管的
-`SkyComputerUseService`**，应用没在跑时调用会报
-`-10005: codex app-server exited before returning a response`。所以两台 mac 的 `cua-up.sh`
-里都加了「应用没在跑就 `open -g -a ChatGPT` 后台拉起」。
+| | 26.715 | 26.901 |
+|---|---|---|
+| 首次读状态 | 18.8s | 1.6s |
+| 稳态读状态 | — | 1.0s |
+| 工具面 | 只有 10 个离散工具 | 另有 `computer_js` |
 
-### mac-mini-1 差的那一步
+为兼容旧版加的三处（驱动路径探测、`runtimeStatus` 可能缺失、启动超时分两档）保留着，
+以后哪台机器的应用再漂移不用改代码。
 
-它原来没装 ChatGPT.app。官方 CDN 上那个 `ChatGPT.dmg` 是旧分发包（1.2026.183，162MB），
-不带 codex 和插件；带 codex 的那版是 1.3GB，要靠应用自己更新拿到，而应用要先登录。
-所以下一步是**在 mac-mini-1 的屏幕前登录一次 ChatGPT**，让它更新到当前版本，
-之后照第七节把 `cua-up.sh` + launchd + 隧道（27789）铺上就行。
+### 建连慢的真正原因：codex_apps
+
+air 升级后单次调用已经 1 秒，但建连仍要 20 多秒，mini-2 只要 2 秒。分段计时发现卡在
+`mcpServerStatus/list`：它要等**所有** server 起完，其中有个内置的 `codex_apps`
+（连接器运行时，94 个工具，要联网拉账号里的 app 清单），公司那台 24 秒、家里那台 2 秒。
+
+`codex_apps` 关不掉——传 `enabled: false` 会让 `thread/start` 直接报
+`invalid transport in mcp_servers.codex_apps`。所以改成**不等它**：拉清单只给 8 秒，
+超时就先按静态清单开工，后台等真清单回来再替换。air 的建连因此 25 秒降到 10 秒。
+
+### mac-mini-1 差的那一步：两个系统权限
+
+服务、隧道、配置都铺好了，`computer_list_apps` 秒回，但 `computer_get_app_state` 会挂住——
+读界面要辅助功能、截图要屏幕录制，新装的应用第一次用时 macOS 弹一个要人点的框，
+**没点之前调用不报错，就是一直等**。
+
+要用户在 mac-mini-1 上做一次：系统设置 → 隐私与安全性 → 辅助功能 / 屏幕录制，把 ChatGPT 勾上。
+hub 现在会在这种超时上附一句针对性提示，不用再猜。

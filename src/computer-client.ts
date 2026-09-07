@@ -26,6 +26,17 @@ const CONNECT_TIMEOUT_MS = 10_000;
  * 所以比握手宽松得多。
  */
 const STARTUP_TIMEOUT_MS = 45_000;
+/**
+ * 拉工具清单（mcpServerStatus/list）的等待上限。
+ *
+ * 这一步会等**所有** server 都启动完，包括我们关不掉的内置 `codex_apps`
+ * （连接器运行时，94 个工具，要联网拉账号里的 app 清单）。它在公司网那台上要 24 秒，
+ * 家里那台 2 秒。而我们要的 computer-use 早就连上了。
+ * 所以只给它 8 秒，超时就先按静态清单开工，后台继续等真清单回来再替换。
+ * codex_apps 不能用 mcp_servers 的 enabled:false 关——那样 thread/start 直接报
+ * "invalid transport in mcp_servers.codex_apps"。
+ */
+const TOOLS_LIST_TIMEOUT_MS = 8_000;
 /** 单次工具调用的默认超时。mac 上读状态 0.3s，windows 上 3s，冷启动 app 可能十几秒 */
 const DEFAULT_CALL_TIMEOUT_MS = 90_000;
 /** 拉起 app-server 后等它 bind 端口 */
@@ -83,6 +94,8 @@ interface Conn {
    * 授权问询到达时靠它判断「这是不是我们自己这次调用引出来的」。
    */
   inflightApp?: string;
+  /** 工具清单还没拿到（上游 list 慢，先按静态清单开工），拿到后置回 false */
+  toolsPending?: boolean;
   closed: boolean;
 }
 
@@ -411,6 +424,7 @@ export class ComputerClientManager {
       pending: new Map(),
       elicitations: [],
       inflightApp: undefined,
+      toolsPending: false,
       closed: false,
     };
 
@@ -484,7 +498,24 @@ export class ComputerClientManager {
     }
     c.thread = th.result.thread.id;
 
-    const inv = await this.rpc(c, "mcpServerStatus/list", { threadId: c.thread }, STARTUP_TIMEOUT_MS);
+    const listReq = this.rpc(c, "mcpServerStatus/list", { threadId: c.thread }, STARTUP_TIMEOUT_MS);
+    let inv: any;
+    try {
+      inv = await withTimeout(listReq, TOOLS_LIST_TIMEOUT_MS, `拉 ${name} 的工具清单`);
+    } catch {
+      // 慢的是 codex_apps 那类跟我们无关的 server。先放行，后台把真清单补上。
+      c.toolsPending = true;
+      listReq
+        .then((late: any) => {
+          applyServerList(name, c, n, driver, late.result?.data ?? []);
+          c.toolsPending = false;
+        })
+        .catch(() => {
+          c.toolsPending = false;
+        });
+      this.conns.set(name, c);
+      return c;
+    }
     const data: any[] = inv.result?.data ?? [];
     const wanted = wantedServers(n, driver);
     for (const s of data) {
@@ -564,17 +595,38 @@ export class ComputerClientManager {
       }
     };
 
+    const hintOnTimeout = (e: unknown): Error => {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/超时/.test(msg) || this.getNode(name)?.computer.platform !== "mac") {
+        return e instanceof Error ? e : new Error(msg);
+      }
+      // 读状态挂住、而 list_apps 之类不碰屏幕的调用正常 = 那台机器没给权限。
+      // macOS 会弹一个要人点的授权框，进程就停在那儿等，不会报错。
+      return new Error(
+        `${msg}\n` +
+          `${name} 上多半是**辅助功能 / 录屏权限没给**：读界面和截图要这两个权限，` +
+          `没给的时候 macOS 弹一个要人点的框，调用就一直挂着、不会报错。\n` +
+          `判据：computer_list_apps 能秒回、computer_get_app_state 卡住，就是它。\n` +
+          `让用户在那台机器上开：系统设置 → 隐私与安全性 → 辅助功能 / 屏幕录制，` +
+          `把 ChatGPT 勾上（新装的应用第一次用一定要走这一步）。`
+      );
+    };
+
     let resp: any;
     try {
       resp = await doCall(c);
     } catch (e) {
-      if (!isConnectionError(e)) throw e;
+      if (!isConnectionError(e)) throw hintOnTimeout(e);
       // 连接层断了（app-server 重启 / 隧道抖）：重建一次再试。
       // 只重试一次，且不管工具是不是只读——桌面动作重放会真的按第二次，
       // 所以这里只在**连接根本没建立起来**的情况下重来，call 已经发出去的不重放。
       this.conns.delete(name);
       c = await this.ensure(name);
-      resp = await doCall(c);
+      try {
+        resp = await doCall(c);
+      } catch (e2) {
+        throw hintOnTimeout(e2);
+      }
     }
 
     const elicitations = c.elicitations.splice(0);
@@ -633,6 +685,26 @@ export class ComputerClientManager {
       this.onIdleDrop?.(name);
     }
   }
+}
+
+/**
+ * 把上游报的 server 清单收进连接里。建连时同步走一遍；上游慢的时候后台回来再走一遍。
+ * 后台这遍不抛错——那时候调用方早就在用了，报错没人接。
+ */
+function applyServerList(
+  name: string,
+  c: Conn,
+  n: ComputerNode,
+  driver: MacDriver | undefined,
+  data: any[]
+): void {
+  const wanted = wantedServers(n, driver);
+  for (const s of data) {
+    if (!wanted.includes(s.name)) continue;
+    const tools = s.tools ?? {};
+    if (Object.keys(tools).length > 0) c.tools.set(s.name, tools);
+  }
+  void name;
 }
 
 /** 一台 mac 上 computer-use 插件的实际布局（版本不同布局不同，见 detectMacDriver） */
