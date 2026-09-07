@@ -1,0 +1,21 @@
+src/computer-client.ts
+  s_dd47599cad225d::t_6ed2f0742e88f1 21,23-28,121-122,238-271,474-475,480,487,489,492-497,499-500,506,638-647,649-653,672-673,693,696,698,702-703
+src/computer-hub.ts
+  s_dd47599cad225d::t_b083574561f5d4 163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "aecc20f38e35dc24dd6406465d1f17b1a087246e",
+  "prompts": {},
+  "sessions": {
+    "s_dd47599cad225d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f2b381f6-0560-4f4b-9afb-0692e61e5def",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
