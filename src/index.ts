@@ -17,6 +17,9 @@ import { buildHubServer } from "./hub.js";
 import { loadBrowserConfig } from "./browser-config.js";
 import { BrowserClientManager } from "./browser-client.js";
 import { buildBrowserHubServer } from "./browser-hub.js";
+import { loadComputerConfig } from "./computer-config.js";
+import { ComputerClientManager } from "./computer-client.js";
+import { buildComputerHubServer } from "./computer-hub.js";
 
 const PKG_VERSION: string = (() => {
   try {
@@ -479,6 +482,77 @@ async function startBrowserHubServer(argv: string[]): Promise<void> {
 }
 
 /**
+ * 启动 computer-hub 模式：把远程机器上的桌面操作能力统一成一组 computer_* 工具，
+ * 外加一个 computer_node 用来选机器。
+ *
+ * - 桌面操作全部发生在远程机器（mac / windows）上；VPS 只跑这个转发进程。
+ * - 上游是 OpenAI ChatGPT.app 自带的 codex app-server（websocket 上的 JSON-RPC，不是 MCP），
+ *   我们只借它的桌面驱动，不调用任何 OpenAI 模型。
+ * - 配置寄生在 ssh-hub 那份 hub.json 里：节点的 computer 段。
+ * - 拉起远端 app-server 是借该机器自己的 ssh daemon 执行的，computer-hub 不实现任何 ssh 能力。
+ * - 屏幕是共享面：一台机器同时只给一个会话用（browser-hub 那边靠 --isolated 可以并发，这边不行）。
+ */
+async function startComputerHubServer(argv: string[]): Promise<void> {
+  const getArg = (name: string): string | undefined => {
+    const i = argv.indexOf(name);
+    if (i >= 0 && i + 1 < argv.length) return argv[i + 1];
+    return undefined;
+  };
+
+  const cfg = loadComputerConfig(getArg("--hub-config"));
+  const nodeNames = cfg.nodes.map((n) => n.name).join(", ");
+
+  let sshNodes: HubNode[];
+  try {
+    sshNodes = loadHubConfig(getArg("--hub-config")).nodes;
+  } catch {
+    sshNodes = cfg.nodes
+      .filter((n) => n.sshUrl || n.sshLocal)
+      .map((n) => ({ name: n.name, url: n.sshUrl, token: n.sshToken, local: n.sshLocal }));
+  }
+
+  const makeServer = () => {
+    const hub = new HubClientManager(sshNodes, PKG_VERSION);
+    const cmgr = new ComputerClientManager(cfg.nodes, hub, PKG_VERSION);
+    const { server, close } = buildComputerHubServer(cfg, cmgr, PKG_VERSION);
+    return {
+      server,
+      close: async () => {
+        await close().catch(() => {});
+        await hub.closeAll().catch(() => {});
+      },
+    };
+  };
+
+  const httpOpts = parseHttpOptions(argv);
+  if (httpOpts) {
+    console.error(
+      `[mcp-ssh-pty:computer-hub] computer hub (http): ${cfg.nodes.length} node(s): ${nodeNames}`
+    );
+    await serveHttp(httpOpts, {
+      name: "computer-hub",
+      // 会话回收会顺带收掉上游 thread（连同它在那台机器上起的 computer-use 子进程）。
+      defaultIdleMs: 2 * 60 * 60 * 1000,
+      makeServer,
+    });
+    return;
+  }
+
+  const { server, close } = makeServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(`[mcp-ssh-pty] computer hub: ${cfg.nodes.length} node(s): ${nodeNames}`);
+
+  const cleanup = async () => {
+    await close();
+    process.exit(0);
+  };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+  onStdinEnd(cleanup);
+}
+
+/**
  * 主函数
  */
 async function main(): Promise<void> {
@@ -488,6 +562,11 @@ async function main(): Promise<void> {
   }
 
   const argv = process.argv.slice(2);
+
+  if (argv.includes("--computer-hub")) {
+    await startComputerHubServer(argv);
+    return;
+  }
 
   if (argv.includes("--browser-hub")) {
     await startBrowserHubServer(argv);
