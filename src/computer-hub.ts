@@ -160,7 +160,7 @@ export function buildComputerHubServer(
       平台: n.computer.platform,
       工具面:
         n.computer.platform === "mac"
-          ? "10 个离散工具（按 app 名寻址）+ computer_js（cua.* 接口）"
+          ? "10 个离散工具（按 app 名寻址）；新版 ChatGPT.app 另有 computer_js（cua.* 接口），旧版没有——以 connect 之后的实际工具清单为准"
           : "只有 computer_js（sky.* 接口，按窗口寻址）",
       授权策略: n.computer.approve ?? "low",
       占用: holders.get(n.name) ? (holders.get(n.name) === owner ? "本会话" : "别的会话") : "空闲",

@@ -18,8 +18,14 @@ import { probeTcp } from "./net-probe.js";
  * 必须回一条 {id, result:{action}}，不回它就一直等着。
  */
 
-/** 握手超时：机器半死（端口在 listen 但进程无响应）时别卡满 */
+/** 建连 + initialize 的超时：机器半死（端口在 listen 但进程无响应）时别卡满 */
 const CONNECT_TIMEOUT_MS = 10_000;
+/**
+ * thread/start 和 mcpServerStatus/list 的超时。这两步会真的把 computer-use 的进程拉起来，
+ * 慢的机器上要十几秒（air 的 ChatGPT.app 26.715 实测比 mini-2 的 26.901 慢一个量级），
+ * 所以比握手宽松得多。
+ */
+const STARTUP_TIMEOUT_MS = 45_000;
 /** 单次工具调用的默认超时。mac 上读状态 0.3s，windows 上 3s，冷启动 app 可能十几秒 */
 const DEFAULT_CALL_TIMEOUT_MS = 90_000;
 /** 拉起 app-server 后等它 bind 端口 */
@@ -112,6 +118,8 @@ export class ComputerClientManager {
   private idleDropped = new Set<string>();
   /** 每台机器 config.toml 里配了哪些 mcp_servers（要显式关掉，见 configuredServers） */
   private serverNames = new Map<string, string[]>();
+  /** 每台 mac 上 computer-use 插件的实际布局（见 MacDriver） */
+  private macDrivers = new Map<string, MacDriver>();
   /** idle 回收发生时通知上层（用来同步释放独占记账） */
   onIdleDrop?: (node: string) => void;
 
@@ -225,6 +233,40 @@ export class ComputerClientManager {
     }
     this.serverNames.set(n.name, names);
     return names;
+  }
+
+  /**
+   * 探一台 mac 上 computer-use 插件的实际布局。
+   *
+   * 三台 mac 的 ChatGPT.app 版本不一样，插件布局跟着变，写死路径只能覆盖其中一种：
+   * - 新版（26.901）：computer-use/bin/computer-use-client-launcher，另有 unified-computer-use 插件（js 工具）
+   * - 旧版（26.715）：computer-use/Codex Computer Use.app/…/SkyComputerUseClient，**没有** unified 插件
+   * 所以建连前问一次那台机器，按实际情况拼 thread 配置。结果缓存，一个会话只问一次。
+   */
+  private async detectMacDriver(n: ComputerNode): Promise<MacDriver> {
+    const cached = this.macDrivers.get(n.name);
+    if (cached) return cached;
+    const script = [
+      'P=/Applications/ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins',
+      'NEW="$P/computer-use/bin/computer-use-client-launcher"',
+      'OLD="$P/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"',
+      'if [ -x "$NEW" ]; then echo "DRIVER=$NEW"; elif [ -x "$OLD" ]; then echo "DRIVER=$OLD"; else echo "DRIVER="; fi',
+      'echo "CWD=$P/computer-use"',
+      '[ -d "$P/unified-computer-use" ] && echo "UNIFIED=yes" || echo "UNIFIED=no"',
+    ].join('; ');
+    const out = await this.runOnHost(n, script, 15);
+    const get = (k: string): string =>
+      out.split("\n").map((l) => l.trim()).find((l) => l.startsWith(k + "="))?.slice(k.length + 1) ?? "";
+    const command = get("DRIVER");
+    if (!command) {
+      throw new Error(
+        `${n.name} 上找不到 computer-use 插件的可执行文件。ChatGPT.app 没装、或者版本换了布局。\n` +
+          `探测输出：${out.slice(0, 300)}`
+      );
+    }
+    const driver: MacDriver = { command, cwd: get("CWD"), hasUnified: get("UNIFIED") === "yes" };
+    this.macDrivers.set(n.name, driver);
+    return driver;
   }
 
   /** 拉起某台机器的 app-server，然后等它 bind 端口 */
@@ -429,32 +471,39 @@ export class ComputerClientManager {
     const codexHome: string = init.result.codexHome;
     this.send(c, { method: "initialized" });
 
-    const { servers, plugins } = threadConfig(n, codexHome, await this.configuredServers(n));
+    const driver = n.computer.platform === "mac" ? await this.detectMacDriver(n) : undefined;
+    const { servers, plugins } = threadConfig(n, codexHome, await this.configuredServers(n), driver);
     const th = await this.rpc(
       c,
       "thread/start",
       { cwd: codexHome, ephemeral: true, config: { mcp_servers: servers, plugins } },
-      CONNECT_TIMEOUT_MS
+      STARTUP_TIMEOUT_MS
     );
     if (!th.result?.thread?.id) {
       throw new Error(`thread/start 失败: ${JSON.stringify(th).slice(0, 300)}`);
     }
     c.thread = th.result.thread.id;
 
-    const inv = await this.rpc(c, "mcpServerStatus/list", { threadId: c.thread }, CONNECT_TIMEOUT_MS);
+    const inv = await this.rpc(c, "mcpServerStatus/list", { threadId: c.thread }, STARTUP_TIMEOUT_MS);
     const data: any[] = inv.result?.data ?? [];
-    const wanted = wantedServers(n);
+    const wanted = wantedServers(n, driver);
     for (const s of data) {
       if (!wanted.includes(s.name)) continue;
-      if (s.runtimeStatus !== "connected") {
+      const tools = s.tools ?? {};
+      // 老版本 app-server（air 的 0.145）根本不返回 runtimeStatus 字段，
+      // 只能按"报没报出工具"判断它活没活。新版本（0.153）才有 runtimeStatus。
+      const ok =
+        s.runtimeStatus === undefined ? Object.keys(tools).length > 0 : s.runtimeStatus === "connected";
+      if (!ok) {
         throw new Error(
-          `${name} 上的 '${s.name}' 没连上（runtimeStatus=${s.runtimeStatus}）。` +
+          `${name} 上的 '${s.name}' 没连上（runtimeStatus=${s.runtimeStatus ?? "(这个版本不报)"}，` +
+            `工具数 ${Object.keys(tools).length}）。` +
             `${s.name === MAC_DISCRETE_SERVER || s.name === WIN_JS_SERVER
               ? "多半是那台机器的辅助功能 / 录屏权限没给，或者 ChatGPT.app 版本变了。"
               : ""}`
         );
       }
-      c.tools.set(s.name, s.tools ?? {});
+      c.tools.set(s.name, tools);
     }
     if (c.tools.size === 0) {
       throw new Error(
@@ -586,11 +635,22 @@ export class ComputerClientManager {
   }
 }
 
+/** 一台 mac 上 computer-use 插件的实际布局（版本不同布局不同，见 detectMacDriver） */
+export interface MacDriver {
+  /** 插件里那个可执行文件的绝对路径 */
+  command: string;
+  /** 插件目录（上游要求 cwd 是它） */
+  cwd: string;
+  /** 有没有 unified-computer-use 插件（有才有 js 工具；旧版 ChatGPT.app 没有） */
+  hasUnified: boolean;
+}
+
 /** 这台机器上要开哪些上游 server */
-export function wantedServers(n: ComputerNode): string[] {
-  return n.computer.platform === "mac"
-    ? [MAC_DISCRETE_SERVER, MAC_JS_SERVER]
-    : [WIN_JS_SERVER];
+export function wantedServers(n: ComputerNode, driver?: MacDriver): string[] {
+  if (n.computer.platform !== "mac") return [WIN_JS_SERVER];
+  return driver?.hasUnified === false
+    ? [MAC_DISCRETE_SERVER]
+    : [MAC_DISCRETE_SERVER, MAC_JS_SERVER];
 }
 
 /** 某个对外工具该发给上游哪个 server */
@@ -609,7 +669,8 @@ export function serverFor(n: ComputerNode, toolName: string): string {
 function threadConfig(
   n: ComputerNode,
   codexHome: string,
-  configured: string[]
+  configured: string[],
+  driver?: MacDriver
 ): { servers: Record<string, unknown>; plugins: Record<string, unknown> } {
   const OFF = { enabled: false };
   const plugins: Record<string, unknown> = {};
@@ -629,16 +690,17 @@ function threadConfig(
   for (const s of configured) servers[s] = OFF;
 
   if (n.computer.platform === "mac") {
-    const plugin = "/Applications/ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use";
+    if (!driver) throw new Error("mac 节点缺少插件布局探测结果（detectMacDriver 没跑）");
     servers[MAC_DISCRETE_SERVER] = {
       enabled: true,
-      command: `${plugin}/bin/computer-use-client-launcher`,
+      command: driver.command,
       args: ["mcp"],
-      cwd: plugin,
+      cwd: driver.cwd,
       env: { CODEX_HOME: codexHome },
     };
     servers[WIN_JS_SERVER] = OFF; // mac 上 config.toml 里也有 node_repl，用不到就关掉
-    plugins["unified-computer-use@openai-bundled"] = { enabled: true };
+    // 旧版 ChatGPT.app 没有这个插件，开了会报"插件不存在"，所以按实际有没有来
+    if (driver.hasUnified) plugins["unified-computer-use@openai-bundled"] = { enabled: true };
   } else {
     // windows：桌面那半只能走 node_repl + computer-use 插件的 @oai/sky，
     // 它的 unified 插件把 CUA_REPL_ENABLED_SURFACES 写死成 browser，开了也没有桌面 API。

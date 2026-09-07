@@ -1,6 +1,7 @@
 # computer-hub 设计：远程桌面操作统一寻址
 
-状态：**已实现，两台机器落地跑通**（mac-mini-2 + windows-4070ti），2026-09-06。
+状态：**已实现，三台机器落地跑通**（mac-mini-2 + windows-4070ti + macbook-air），2026-09-06。
+mac-mini-1 还差一步：它的 ChatGPT.app 要登录一次才会更新到带 codex 的版本（见第十节）。
 代码在 `src/computer-*.ts`，服务是 VPS 上的 systemd `computer-hub.service`（127.0.0.1:27793）。
 
 一句话：把「桌面操作跑在哪台机器」从每次手工 ssh 变成一次寻址，做法跟 browser-hub 同构，
@@ -46,7 +47,9 @@ Claude Code (VPS)
        │  = 到每台机器一条 websocket = 一个 ephemeral thread
        │
        ├─ mac-mini-2      → ws://127.0.0.1:27786 ─┐ 反向隧道，每台一个独立端口
-       └─ windows-4070ti  → ws://127.0.0.1:27787 ─┘
+       ├─ windows-4070ti  → ws://127.0.0.1:27787  │
+       ├─ macbook-air     → ws://127.0.0.1:27788  │
+       └─（mac-mini-1     → 27789，待它的应用能用）┘
 
 拉起远端 app-server 时：computer-hub ──借 ssh-hub──→ 那台机器上执行 up 命令
 ```
@@ -213,3 +216,38 @@ VPS 只跑这个转发进程。桌面操作全部发生在远程机器上，屏�
 
 - 三个 hub 的配置共读一份 hub.json，改完这份后 ssh-hub / browser-hub / computer-hub
   三个 loader 都验过能正常加载（老代码对未知键不做校验）。
+
+---
+
+## 十、三台 mac 的版本差异（这一节是踩出来的）
+
+三台机器上 ChatGPT.app 的版本不一样，布局和行为都跟着变。hub 在建连前会探一次，
+不用手工配，但知道差在哪有助于排查。
+
+| | mac-mini-2 | macbook-air | mac-mini-1 |
+|---|---|---|---|
+| ChatGPT.app | 26.901 | 26.715 | 1.2026.183（旧分发包，**没有** codex 和插件） |
+| codex | 0.153.4 | 0.145.0-alpha.18 | 无 |
+| 驱动路径 | `computer-use/bin/computer-use-client-launcher` | `computer-use/Codex Computer Use.app/…/SkyComputerUseClient` | 无 |
+| unified 插件 | 有（所以有 `computer_js`） | 没有（只有 10 个离散工具） | 无 |
+| `mcpServerStatus/list` | 返回 `runtimeStatus` | **不返回**这个字段 | — |
+| 建连 / 首次调用 | 2s / 0.4s | 31s / 19s | — |
+
+由此在代码里加了三处兼容：
+
+1. **驱动路径探测**：建连前经 ssh-hub 在那台机器上看哪个可执行文件存在，按实际的拼 thread 配置。
+2. **`runtimeStatus` 可能不存在**：老版本判"活没活"只能看它报没报出工具。
+3. **启动超时分两档**：建连 + initialize 10 秒，`thread/start` 和拉工具清单 45 秒
+   （air 上实测要十几秒）。
+
+还有一条不在代码里、在机器上：**老架构的 computer-use 客户端要连 ChatGPT.app 托管的
+`SkyComputerUseService`**，应用没在跑时调用会报
+`-10005: codex app-server exited before returning a response`。所以两台 mac 的 `cua-up.sh`
+里都加了「应用没在跑就 `open -g -a ChatGPT` 后台拉起」。
+
+### mac-mini-1 差的那一步
+
+它原来没装 ChatGPT.app。官方 CDN 上那个 `ChatGPT.dmg` 是旧分发包（1.2026.183，162MB），
+不带 codex 和插件；带 codex 的那版是 1.3GB，要靠应用自己更新拿到，而应用要先登录。
+所以下一步是**在 mac-mini-1 的屏幕前登录一次 ChatGPT**，让它更新到当前版本，
+之后照第七节把 `cua-up.sh` + launchd + 隧道（27789）铺上就行。
