@@ -1,0 +1,14 @@
+docs/computer-hub.md
+  h_4b190f792175d0 1-215
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "8cbf702e786319582f05b1a685eb41b467cd0a42",
+  "prompts": {},
+  "humans": {
+    "h_4b190f792175d0": {
+      "author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
