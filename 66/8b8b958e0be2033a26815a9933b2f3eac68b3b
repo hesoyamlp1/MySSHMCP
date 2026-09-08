@@ -1,0 +1,33 @@
+package-lock.json
+  s_33b84ce1f22f45::t_d1de1bbac2f269 3,9
+src/im-feishu.ts
+  s_830fa1d094a309::t_ba67c394106f1f 1-198
+docs/im-hub.md
+  s_830fa1d094a309::t_60a8f52d415015 1-137
+package.json
+  s_33b84ce1f22f45::t_1008753f18f622 3,50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "668b8b958e0be2033a26815a9933b2f3eac68b3b",
+  "prompts": {},
+  "sessions": {
+    "s_33b84ce1f22f45": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0ad3935b-837a-4f46-a1b6-a76cc915b604",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    },
+    "s_830fa1d094a309": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9040e2b4-327e-45c7-bc71-e89b8a3f62ff",
+        "model": "claude-opus-5"
+      },
+      "human_author": "LinSuki <admin@toddout.work>"
+    }
+  }
+}
