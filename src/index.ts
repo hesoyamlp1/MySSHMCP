@@ -553,6 +553,41 @@ async function startComputerHubServer(argv: string[]): Promise<void> {
 }
 
 /**
+ * 启动 im-hub 模式：读飞书消息的四个 im_* 工具。
+ *
+ * 和另外三个 hub 不一样，它不连任何机器——数据在 VPS 本地的 SQLite 里，
+ * 由 `--im-sync`（定时任务调）填进去。所以这里没有节点、没有连接管理。
+ */
+async function startImHubServer(argv: string[]): Promise<void> {
+  const { buildImHubServer } = await import("./im-hub.js");
+  const { loadImConfig } = await import("./im-config.js");
+
+  // 起进程时就把配置读一遍：配置不存在或缺 meOpenId 要当场报，别等第一次调用工具才炸
+  const cfg = loadImConfig();
+  const watching = cfg.chats.filter((c) => c.monitored).length;
+
+  const httpOpts = parseHttpOptions(argv);
+  if (httpOpts) {
+    console.error(`[mcp-ssh-pty:im-hub] im hub (http): ${watching} 个会话在监控，库 ${cfg.dbPath}`);
+    await serveHttp(httpOpts, {
+      name: "im-hub",
+      defaultIdleMs: 2 * 60 * 60 * 1000,
+      makeServer: () => ({ server: buildImHubServer(), close: async () => {} }),
+    });
+    return;
+  }
+
+  const server = buildImHubServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(`[mcp-ssh-pty] im hub: ${watching} 个会话在监控`);
+  const cleanup = async () => process.exit(0);
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+  onStdinEnd(cleanup);
+}
+
+/**
  * 主函数
  */
 async function main(): Promise<void> {
@@ -562,6 +597,28 @@ async function main(): Promise<void> {
   }
 
   const argv = process.argv.slice(2);
+
+  // 采集一轮就退出，给 crontab 用；不进 MCP 循环
+  if (argv.includes("--im-sync")) {
+    const { runSyncCLI } = await import("./im-sync.js");
+    process.exit(await runSyncCLI(argv));
+  }
+
+  // 生成配置：把会话拉下来，近期有真人说话的默认开监控
+  if (argv.includes("--im-init")) {
+    const { initConfig } = await import("./im-sync.js");
+    const i = argv.indexOf("--profile");
+    const profile = i >= 0 ? argv[i + 1] : "mori";
+    const r = await initConfig(profile);
+    console.log(`配置写好了: ${r.path}\n身份: ${r.me}\n会话 ${r.total} 个，其中 ${r.monitored} 个纳入监控`);
+    console.log(`接着跑一次采集: mcp-ssh-pty --im-sync`);
+    process.exit(0);
+  }
+
+  if (argv.includes("--im-hub")) {
+    await startImHubServer(argv);
+    return;
+  }
 
   if (argv.includes("--computer-hub")) {
     await startComputerHubServer(argv);
